@@ -1,10 +1,10 @@
-# 虫驹学习助手 (ChoujuXxt)
+# 丑橘学习助手 (ChoujuXxt)
 
 <p align="center">
-  <img src="cover.jpg" width="200" alt="虫驹学习助手封面"/>
+  <img src="cover.jpg" width="200" alt="丑橘学习助手封面"/>
 </p>
 
-**虫驹学习助手** 是一款 Android 悬浮窗 AI 客户端，专注于学习场景下的智能辅助。支持悬浮球常驻桌面，一键截图识题、AI 解答、自动填写，让学习更高效。
+**丑橘学习助手** 是一款 Android 悬浮窗 AI 客户端，专注于学习场景下的智能辅助。支持悬浮球常驻桌面，一键截图识题、AI 解答、自动填写，让学习更高效。
 
 > 本项目基于 [HanakoAI](https://github.com/zyf2007/HanakoAI) 二次开发，遵循 [AGPL-3.0](LICENSE) 协议。
 
