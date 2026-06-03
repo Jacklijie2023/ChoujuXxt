@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.ButtonDefaults
@@ -56,6 +57,7 @@ import `fun`.kirari.hanako.data.AssistantPreset
 import `fun`.kirari.hanako.data.previewPrompt
 import `fun`.kirari.hanako.data.ProcessingRoute
 import `fun`.kirari.hanako.data.ScreenCaptureMethod
+import `fun`.kirari.hanako.util.HapticHelper
 import kotlinx.coroutines.delay
 
 @Composable
@@ -168,21 +170,38 @@ fun HeroSection(
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
                 )
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    ProcessingRoute.entries.forEach { item ->
-                        val isSelected = route == item
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // 第一行：OCR 和多模态
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         ModeSelectorItem(
                             modifier = Modifier.weight(1f),
-                            title = if (item == ProcessingRoute.OCR_THEN_LLM) "OCR 模式" else "多模态视觉",
-                            subtitle = if (item == ProcessingRoute.OCR_THEN_LLM) "提取文字后分析" else "直接分析全屏幕",
-                            icon = if (item == ProcessingRoute.OCR_THEN_LLM) Icons.Default.Language else Icons.Default.AutoAwesome,
-                            isSelected = isSelected,
-                            onClick = { onSelectRoute(item) }
+                            title = "OCR 模式",
+                            subtitle = "截屏+OCR 提取文字后分析",
+                            icon = Icons.Default.Language,
+                            isSelected = route == ProcessingRoute.OCR_THEN_LLM,
+                            onClick = { onSelectRoute(ProcessingRoute.OCR_THEN_LLM) }
+                        )
+                        ModeSelectorItem(
+                            modifier = Modifier.weight(1f),
+                            title = "多模态视觉",
+                            subtitle = "截屏后直接送视觉模型",
+                            icon = Icons.Default.AutoAwesome,
+                            isSelected = route == ProcessingRoute.MULTIMODAL_DIRECT,
+                            onClick = { onSelectRoute(ProcessingRoute.MULTIMODAL_DIRECT) }
                         )
                     }
+                    // 第二行：无障碍模式
+                    ModeSelectorItem(
+                        modifier = Modifier.fillMaxWidth(),
+                        title = "无障碍提取",
+                        subtitle = "无需截屏，直接从屏幕 UI 节点提取文本",
+                        icon = Icons.Default.AccessibilityNew,
+                        isSelected = route == ProcessingRoute.ACCESSIBILITY_TEXT,
+                        onClick = { onSelectRoute(ProcessingRoute.ACCESSIBILITY_TEXT) }
+                    )
                 }
             }
 
@@ -333,7 +352,10 @@ fun ModeSelectorItem(
         modifier = modifier
             .height(96.dp)
             .clip(RoundedCornerShape(18.dp))
-            .clickable { onClick() },
+            .clickable {
+                HapticHelper.lightTap()
+                onClick()
+            },
         shape = RoundedCornerShape(18.dp),
         color = containerColor,
         border = if (borderDp > 0.dp) BorderStroke(borderDp, MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.1f)) else null

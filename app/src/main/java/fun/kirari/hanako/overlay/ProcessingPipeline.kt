@@ -17,6 +17,7 @@ import `fun`.kirari.hanako.data.ProcessingStatus
 import `fun`.kirari.hanako.data.resolveModelName
 import `fun`.kirari.hanako.data.resolveModelProvider
 import `fun`.kirari.hanako.data.saveToHistoryFile
+import `fun`.kirari.hanako.accessibility.HanakoAccessibilityService
 import `fun`.kirari.hanako.debug.AppDebugLogStore
 import `fun`.kirari.hanako.localocr.LocalOcrManager
 import `fun`.kirari.hanako.network.LlmEvent
@@ -90,6 +91,7 @@ internal class ProcessingPipeline(
             modelSummary = when (models.route) {
                 ProcessingRoute.OCR_THEN_LLM -> buildModelSummary(models.textModel, models.textProvider?.name)
                 ProcessingRoute.MULTIMODAL_DIRECT -> buildModelSummary(models.visionModel, models.visionProvider?.name)
+                ProcessingRoute.ACCESSIBILITY_TEXT -> buildModelSummary(models.textModel, models.textProvider?.name)
             },
             detail = detail,
             screenshotPath = screenshotPaths.firstOrNull(),
@@ -110,6 +112,12 @@ internal class ProcessingPipeline(
     fun validateVisionModels(models: ResolvedModels) {
         if (models.visionProvider == null || models.visionModel.isBlank()) {
             error("请先在模型设置中配置多模态模型")
+        }
+    }
+
+    fun validateTextModels(models: ResolvedModels) {
+        if (models.textProvider == null || models.textModel.isBlank()) {
+            error("请先在模型设置中配置文本模型")
         }
     }
 
@@ -196,7 +204,11 @@ internal class ProcessingPipeline(
         val tc = streamResult.toolCall ?: error("自动模式未调用工具")
         return AutomationResult(
             thought = streamResult.thought,
-            action = validateAutomationAction(tc.name, tc.arguments["text"]?.toString()?.trim('"').orEmpty())
+            action = validateAutomationAction(
+                tc.name,
+                tc.arguments["text"]?.toString()?.trim('"').orEmpty(),
+                tc.arguments
+            )
         )
     }
 
@@ -260,6 +272,63 @@ internal class ProcessingPipeline(
         )
         AppDebugLogStore.i(tag, "streamVisionDirect success answerLength=${answer.length}")
         return answer
+    }
+
+    /**
+     * 无障碍提取文本 → LLM 分析。无需截屏，直接从屏幕 UI 节点提取文本。
+     */
+    suspend fun streamAccessibilityThenChat(
+        models: ResolvedModels,
+        onTextDelta: (String) -> Unit,
+        onAnswerDelta: (String) -> Unit
+    ): Pair<String, String> {
+        AppDebugLogStore.i(tag, "streamAccessibilityThenChat textModel=${models.textModel}")
+        val extractedText = HanakoAccessibilityService.extractTextFromScreen()
+        if (extractedText.isBlank()) {
+            error("无障碍服务未获取到任何文本，请检查无障碍权限是否已开启")
+        }
+        onTextDelta(extractedText)
+
+        val answer = collectTextStream(
+            provider = requireNotNull(models.textProvider),
+            model = models.textModel,
+            systemPrompt = assistantPromptWithCopyMarker(models.assistant.textPrompt),
+            userPrompt = "以下是从屏幕 UI 节点提取的文本，请完成任务：\n$extractedText",
+            firstDeltaTimeoutMillis = models.firstDeltaTimeoutMillis,
+            trustAllHttpsCertificates = models.trustAllHttpsCertificates,
+            onDelta = onAnswerDelta
+        )
+        AppDebugLogStore.i(tag, "streamAccessibilityThenChat success textLength=${extractedText.length} answerLength=${answer.length}")
+        return extractedText to answer
+    }
+
+    /**
+     * 无障碍提取文本 → LLM 自动化。无需截屏。
+     */
+    suspend fun streamAccessibilityThenAutomation(
+        models: ResolvedModels,
+        onTextDelta: (String) -> Unit,
+        onThoughtDelta: (String) -> Unit
+    ): Pair<String, AutomationResult> {
+        AppDebugLogStore.i(tag, "streamAccessibilityThenAutomation textModel=${models.textModel}")
+        val extractedText = HanakoAccessibilityService.extractTextFromScreen()
+        if (extractedText.isBlank()) {
+            error("无障碍服务未获取到任何文本，请检查无障碍权限是否已开启")
+        }
+        onTextDelta(extractedText)
+
+        val streamResult = collectToolStream(
+            provider = requireNotNull(models.textProvider),
+            model = models.textModel,
+            systemPrompt = automationSystemPrompt(models.assistant.textPrompt),
+            userPrompt = "以下是从屏幕 UI 节点提取的文本，请先输出思考过程，再通过一次工具调用给出自动模式动作：\n$extractedText",
+            firstDeltaTimeoutMillis = models.firstDeltaTimeoutMillis,
+            trustAllHttpsCertificates = models.trustAllHttpsCertificates,
+            onThoughtDelta = onThoughtDelta
+        )
+        val result = buildAutomationResult(streamResult)
+        AppDebugLogStore.i(tag, "streamAccessibilityThenAutomation success textLength=${extractedText.length} thoughtLength=${result.thought.length}")
+        return extractedText to result
     }
 
     suspend fun streamOcrThenAutomation(
@@ -334,8 +403,10 @@ internal class ProcessingPipeline(
         screenshotPaths: List<String>
     ): ProcessingResult {
         val events = base.events.toMutableList()
-        if (models.route == ProcessingRoute.OCR_THEN_LLM) {
-            events.add(ProcessingEvent(title = "OCR 完成", detail = "已提取 ${ocrText.length} 个字符"))
+        when (models.route) {
+            ProcessingRoute.OCR_THEN_LLM -> events.add(ProcessingEvent(title = "OCR 完成", detail = "已提取 ${ocrText.length} 个字符"))
+            ProcessingRoute.ACCESSIBILITY_TEXT -> events.add(ProcessingEvent(title = "无障碍提取完成", detail = "已提取 ${ocrText.length} 个字符"))
+            else -> {}
         }
         events.add(ProcessingEvent(title = "答案完成", detail = "已生成 ${answer.length} 个字符"))
         return ProcessingResult(
@@ -346,6 +417,7 @@ internal class ProcessingPipeline(
             modelSummary = when (models.route) {
                 ProcessingRoute.OCR_THEN_LLM -> buildModelSummary(models.textModel, models.textProvider?.name)
                 ProcessingRoute.MULTIMODAL_DIRECT -> buildModelSummary(models.visionModel, models.visionProvider?.name)
+                ProcessingRoute.ACCESSIBILITY_TEXT -> buildModelSummary(models.textModel, models.textProvider?.name)
             },
             detail = "处理完成",
             extractedText = ocrText,
@@ -366,8 +438,10 @@ internal class ProcessingPipeline(
         screenshotPaths: List<String>
     ): Pair<AutomationActionRecord, ProcessingResult> {
         val events = base.events.toMutableList()
-        if (models.route == ProcessingRoute.OCR_THEN_LLM) {
-            events.add(ProcessingEvent(title = "OCR 完成", detail = "已提取 ${ocrText.length} 个字符"))
+        when (models.route) {
+            ProcessingRoute.OCR_THEN_LLM -> events.add(ProcessingEvent(title = "OCR 完成", detail = "已提取 ${ocrText.length} 个字符"))
+            ProcessingRoute.ACCESSIBILITY_TEXT -> events.add(ProcessingEvent(title = "无障碍提取完成", detail = "已提取 ${ocrText.length} 个字符"))
+            else -> {}
         }
         events.add(
             ProcessingEvent(
@@ -383,6 +457,7 @@ internal class ProcessingPipeline(
             modelSummary = when (models.route) {
                 ProcessingRoute.OCR_THEN_LLM -> buildModelSummary(models.textModel, models.textProvider?.name)
                 ProcessingRoute.MULTIMODAL_DIRECT -> buildModelSummary(models.visionModel, models.visionProvider?.name)
+                ProcessingRoute.ACCESSIBILITY_TEXT -> buildModelSummary(models.textModel, models.textProvider?.name)
             },
             detail = "自动处理完成",
             extractedText = ocrText,
@@ -417,10 +492,14 @@ private fun automationSystemPrompt(userPrompt: String): String {
         你当前处于自动答题模式。
         你必须先输出简短、清晰的思考过程，说明你识别到了什么题型以及为什么这样判断。
         思考过程结束后，你必须且只能调用一个工具，不能在工具调用后继续输出额外文本。
-        当答案适合直接填写到输入框、文本框、填空题空格时，调用 set_clipboard。
-        当答案适合让用户直接在悬浮球上查看选项字母时，调用 show_bubble_letters。
-        show_bubble_letters 的 text 参数只能包含英文字母 A-Z，长度为 1 到 4，不能包含空格、标点、中文或解释。
-        set_clipboard 的 text 参数必须是用户可以直接粘贴使用的最终答案。
+
+        可用工具说明：
+        1. set_clipboard — 将答案写入剪贴板，适合填空题、简答题等需要粘贴的场景。
+        2. show_bubble_letters — 在悬浮球上显示选项字母（A-D），适合选择题。text 只能是 1-4 个大写字母。
+        3. auto_fill_input — 自动填写屏幕上的输入框。text 是要填的内容，hint 是输入框的提示文字（如"请输入答案"）。
+        4. auto_click_button — 自动点击屏幕上的按钮。text 是按钮上显示的文字（如"提交"、"确定"）。
+        5. voice_read — 用语音朗读答案。适合用户不方便看屏幕时使用。
+
         不允许调用多个工具，不允许省略工具调用。
 
         ${trimmed.ifBlank { "请根据截图内容判断题目类型，并选择最合适的自动动作。" }}

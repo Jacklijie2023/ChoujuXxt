@@ -340,10 +340,10 @@ fun HistoryDetailScreen(result: ProcessingResult?) {
                 }
             }
         }
-        if (result.route == ProcessingRoute.OCR_THEN_LLM) {
+        if (result.route == ProcessingRoute.OCR_THEN_LLM || result.route == ProcessingRoute.ACCESSIBILITY_TEXT) {
             item {
                 HistoryResultCard(
-                    title = "OCR 结果",
+                    title = if (result.route == ProcessingRoute.ACCESSIBILITY_TEXT) "无障碍提取结果" else "OCR 结果",
                     action = {
                         TextButton(
                             onClick = {
@@ -514,6 +514,9 @@ private fun automationActionLabel(result: ProcessingResult): String {
     return when (result.automationAction?.type) {
         AutomationActionType.SET_CLIPBOARD -> "设置剪贴板"
         AutomationActionType.SHOW_BUBBLE_LETTERS -> "显示悬浮球字母"
+        AutomationActionType.AUTO_FILL_INPUT -> "自动填写"
+        AutomationActionType.AUTO_CLICK_BUTTON -> "自动点击"
+        AutomationActionType.VOICE_READ -> "语音朗读"
         null -> "未调用工具"
     }
 }
@@ -550,6 +553,7 @@ private fun HistoryResultCard(
 private fun ProcessingRoute.displayName(): String = when (this) {
     ProcessingRoute.OCR_THEN_LLM -> "OCR"
     ProcessingRoute.MULTIMODAL_DIRECT -> "多模态"
+    ProcessingRoute.ACCESSIBILITY_TEXT -> "无障碍"
 }
 
 private fun formatHistoryDetailHeader(result: ProcessingResult): String {

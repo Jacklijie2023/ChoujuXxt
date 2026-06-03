@@ -45,6 +45,7 @@ import `fun`.kirari.hanako.debug.AppDebugLogStore
 import `fun`.kirari.hanako.easeOutCubic
 import `fun`.kirari.hanako.copyToClipboard
 import `fun`.kirari.hanako.copyToClipboardWithToast
+import `fun`.kirari.hanako.util.HapticHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -97,6 +98,13 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     private var panelAnimationJob: Job? = null
     private var panelClosing = false
 
+    // 防截屏检测
+    private var secureWindowPollingJob: Job? = null
+    private var currentSecureWindowCount = 0
+
+    // 摇一摇检测
+    private var shakeDetector: ShakeDetector? = null
+
     override fun onCreate() {
         dispatcher.onServicePreSuperOnCreate()
         savedStateRegistryController.performAttach()
@@ -107,6 +115,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
             return
         }
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        HapticHelper.init(this)
         runCatching {
             overlayViewModel = ViewModelProvider(
                 this,
@@ -117,6 +126,8 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
             startForeground(NOTIFICATION_ID, buildNotification())
             showBubble()
             observeUiState()
+            startSecureWindowPolling()
+            startShakeDetection()
         }.onFailure {
             AppDebugLogStore.e(logTag, "Overlay initialization failed", it)
             stopSelf()
@@ -130,7 +141,16 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                 dismissPanel()
                 stopSelf()
             }
-
+            ACTION_CAPTURE -> {
+                // 从通知栏触发截屏处理
+                overlayViewModel.setProcessingRoute(`fun`.kirari.hanako.data.ProcessingRoute.OCR_THEN_LLM)
+                overlayViewModel.handleSingleTap()
+            }
+            ACTION_A11Y_EXTRACT -> {
+                // 从通知栏触发无障碍提取
+                overlayViewModel.setProcessingRoute(`fun`.kirari.hanako.data.ProcessingRoute.ACCESSIBILITY_TEXT)
+                overlayViewModel.handleSingleTap()
+            }
             else -> {
                 intent?.getStringExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE)
                     ?.let { runCatching { OverlayLaunchMode.valueOf(it) }.getOrNull() }
@@ -142,6 +162,9 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
 
     override fun onDestroy() {
         dismissPanel()
+        stopSecureWindowPolling()
+        stopShakeDetection()
+        TtsHelper.shutdown()
         bubbleColorAnimator?.cancel()
         bubbleColorAnimator = null
         bubbleCompletionResetJob?.cancel()
@@ -183,6 +206,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                         )
                         lastHandledCompletionId = completionId
                         state.autoCopiedLabel?.let { copyToClipboard(this@OverlayService, "Hanako Auto Copy", it) }
+                        HapticHelper.successFeedback()
                         if (state.settings.automation.completionNotificationEnabled) {
                             notifyAutomationCompleted(state.autoCopiedLabel)
                         }
@@ -267,7 +291,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                         HapticFeedbackConstants.LONG_PRESS,
                         HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING
                     )
-                    vibrateShort()
+                    HapticHelper.mediumTap()
                     overlayViewModel.handleLongPress()
                 }
             }
@@ -275,6 +299,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
             val doubleTapTimeoutRunnable = Runnable {
                 if (!doubleTapDetected && !longPressTriggered) {
                     // 单击超时，执行单击操作
+                    HapticHelper.lightTap()
                     overlayViewModel.handleSingleTap()
                 }
                 doubleTapDetected = false
@@ -322,6 +347,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                                 // 双击检测
                                 doubleTapDetected = true
                                 removeCallbacks(doubleTapTimeoutRunnable)
+                                HapticHelper.successFeedback()
                                 overlayViewModel.handleDoubleTap()
                             } else {
                                 // 可能是单击或双击的第一次，等待超时
@@ -694,8 +720,76 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         panelClosing = false
     }
 
+    // ========================
+    // 防截屏保护
+    // ========================
+
+    private fun startSecureWindowPolling() {
+        if (secureWindowPollingJob?.isActive == true) return
+        secureWindowPollingJob = serviceScope.launch {
+            AppDebugLogStore.d(logTag, "Secure window polling started")
+            while (isActive) {
+                val count = SecureWindowDetector.getExternalSecureWindowCount()
+                if (count >= 0 && count != currentSecureWindowCount) {
+                    currentSecureWindowCount = count
+                    applySecureMode(count > 0)
+                }
+                delay(800L)
+            }
+        }
+    }
+
+    private fun stopSecureWindowPolling() {
+        secureWindowPollingJob?.cancel()
+        secureWindowPollingJob = null
+        currentSecureWindowCount = 0
+    }
+
+    /**
+     * 切换防截屏模式。
+     * 当外部存在 FLAG_SECURE 窗口时，隐藏悬浮球并标记为安全模式；
+     * 当外部隐私窗口消失时，恢复正常显示。
+     */
+    private fun applySecureMode(secure: Boolean) {
+        val view = bubbleView ?: return
+        val params = bubbleParams ?: return
+        AppDebugLogStore.d(logTag, "applySecureMode secure=$secure")
+        if (secure) {
+            // 隐藏：添加 FLAG_SECURE 并降低透明度
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_SECURE
+            runCatching { windowManager.updateViewLayout(view, params) }
+            view.alpha = 0.15f
+            dismissPanel()
+        } else {
+            // 恢复：移除 FLAG_SECURE 并恢复透明度
+            params.flags = params.flags and WindowManager.LayoutParams.FLAG_SECURE.inv()
+            runCatching { windowManager.updateViewLayout(view, params) }
+            view.alpha = 0.85f
+        }
+    }
+
+    // ========================
+    // 摇一摇检测
+    // ========================
+
+    private fun startShakeDetection() {
+        shakeDetector = ShakeDetector(this).apply {
+            start {
+                AppDebugLogStore.i(logTag, "Shake detected, triggering capture")
+                overlayViewModel.handleSingleTap()
+            }
+        }
+    }
+
+    private fun stopShakeDetection() {
+        shakeDetector?.stop()
+        shakeDetector = null
+    }
+
     companion object {
         const val ACTION_STOP = "fun.kirari.hanako.overlay.STOP"
+        const val ACTION_CAPTURE = "fun.kirari.hanako.overlay.CAPTURE"
+        const val ACTION_A11Y_EXTRACT = "fun.kirari.hanako.overlay.A11Y_EXTRACT"
         internal const val CHANNEL_ID = "overlay_service"
         internal const val AUTOMATION_CHANNEL_ID = "overlay_automation"
         private const val NOTIFICATION_ID = 1001

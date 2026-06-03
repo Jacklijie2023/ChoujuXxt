@@ -98,7 +98,8 @@ data class AssistantPreset(
 @Serializable
 enum class ProcessingRoute {
     OCR_THEN_LLM,
-    MULTIMODAL_DIRECT
+    MULTIMODAL_DIRECT,
+    ACCESSIBILITY_TEXT
 }
 
 @Serializable
@@ -173,13 +174,17 @@ enum class ProcessingStatus {
 @Serializable
 data class AutomationActionRecord(
     val type: AutomationActionType,
-    val text: String
+    val text: String,
+    val extra: String = ""
 )
 
 @Serializable
 enum class AutomationActionType {
     SET_CLIPBOARD,
-    SHOW_BUBBLE_LETTERS
+    SHOW_BUBBLE_LETTERS,
+    AUTO_FILL_INPUT,
+    AUTO_CLICK_BUTTON,
+    VOICE_READ
 }
 
 fun defaultProvider(): ModelProviderConfig = ModelProviderConfig()

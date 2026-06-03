@@ -82,6 +82,7 @@ import `fun`.kirari.hanako.ui.components.ModelPickerListContent
 import `fun`.kirari.hanako.ui.components.ModelPickerSurfaceItem
 import `fun`.kirari.hanako.ui.components.rememberModelPickerState
 import `fun`.kirari.hanako.ui.cropBitmap
+import `fun`.kirari.hanako.util.HapticHelper
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 
@@ -107,10 +108,17 @@ internal fun CropOverlaySheet(
     var cropPromptVisible by remember { mutableStateOf(true) }
     val density = LocalDensity.current
     val selectedAssistant = uiState.settings.assistants.firstOrNull { it.id == uiState.settings.selectedAssistantId }
-    val routeText = if (uiState.settings.processingRoute == ProcessingRoute.OCR_THEN_LLM) "OCR模式" else "多模态模式"
+    val routeText = when (uiState.settings.processingRoute) {
+        ProcessingRoute.OCR_THEN_LLM -> "OCR模式"
+        ProcessingRoute.MULTIMODAL_DIRECT -> "多模态模式"
+        ProcessingRoute.ACCESSIBILITY_TEXT -> "无障碍模式"
+    }
     val ocrProvider = uiState.settings.resolveModelProvider(ModelPurpose.OCR)
     val ocrModel = uiState.settings.resolveModelName(ModelPurpose.OCR)
-    val llmPurpose = if (uiState.settings.processingRoute == ProcessingRoute.OCR_THEN_LLM) ModelPurpose.TEXT else ModelPurpose.VISION
+    val llmPurpose = when (uiState.settings.processingRoute) {
+        ProcessingRoute.OCR_THEN_LLM, ProcessingRoute.ACCESSIBILITY_TEXT -> ModelPurpose.TEXT
+        ProcessingRoute.MULTIMODAL_DIRECT -> ModelPurpose.VISION
+    }
     val llmProvider = uiState.settings.resolveModelProvider(llmPurpose)
     val llmModel = uiState.settings.resolveModelName(llmPurpose)
     val selectionColor = MaterialTheme.colorScheme.primary
@@ -281,6 +289,7 @@ internal fun CropOverlaySheet(
                     ) {
                         Button(
                             onClick = {
+                                HapticHelper.mediumTap()
                                 bitmap?.let {
                                     onConfirm(cropBitmap(it, cropStart, cropEnd, canvasSize))
                                 }
@@ -476,9 +485,9 @@ internal fun ResultOverlaySheet(
                             )
                         }
                     }
-                    if (uiState.settings.processingRoute == ProcessingRoute.OCR_THEN_LLM) {
+                    if (uiState.settings.processingRoute == ProcessingRoute.OCR_THEN_LLM || uiState.settings.processingRoute == ProcessingRoute.ACCESSIBILITY_TEXT) {
                         ResultCard(
-                            title = "OCR 结果",
+                            title = if (uiState.settings.processingRoute == ProcessingRoute.ACCESSIBILITY_TEXT) "无障碍提取结果" else "OCR 结果",
                             actions = {
                                 if (!uiState.working && uiState.liveOcrText.isNotBlank()) {
                                     SmallHeaderAction(
@@ -827,12 +836,16 @@ private fun ModeModelRow(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (currentRoute == ProcessingRoute.OCR_THEN_LLM) "OCR模式" else "多模态模式",
+                    text = when (currentRoute) {
+                        ProcessingRoute.OCR_THEN_LLM -> "OCR模式"
+                        ProcessingRoute.MULTIMODAL_DIRECT -> "多模态模式"
+                        ProcessingRoute.ACCESSIBILITY_TEXT -> "无障碍模式"
+                    },
                     modifier = Modifier.clickable(onClick = onToggleProcessingRoute),
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1
                 )
-                if (currentRoute == ProcessingRoute.OCR_THEN_LLM) {
+                if (currentRoute == ProcessingRoute.OCR_THEN_LLM || currentRoute == ProcessingRoute.ACCESSIBILITY_TEXT) {
                     ModelConfigCarousel(
                         items = listOf(
                             ModelConfigItem(
@@ -986,7 +999,10 @@ private fun SmallHeaderAction(
                     MaterialTheme.colorScheme.surfaceContainerHighest
                 }
             )
-            .clickable(onClick = onClick)
+            .clickable {
+                HapticHelper.lightTap()
+                onClick()
+            }
             .padding(horizontal = 10.dp, vertical = 6.dp),
         style = MaterialTheme.typography.labelMedium,
         color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant

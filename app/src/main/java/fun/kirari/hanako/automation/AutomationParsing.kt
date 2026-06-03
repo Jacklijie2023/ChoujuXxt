@@ -2,7 +2,11 @@ package `fun`.kirari.hanako.automation
 
 import `fun`.kirari.hanako.data.AutomationActionRecord
 
-internal fun validateAutomationAction(name: String, text: String): AutomationActionRecord {
+internal fun validateAutomationAction(
+    name: String,
+    text: String,
+    arguments: Map<String, Any?> = emptyMap()
+): AutomationActionRecord {
     val normalized = text.trim()
     require(normalized.isNotBlank()) { "自动模式工具参数不能为空" }
     return when (name) {
@@ -13,6 +17,12 @@ internal fun validateAutomationAction(name: String, text: String): AutomationAct
             }
             bubbleLettersAction(normalized)
         }
+        "auto_fill_input" -> {
+            val hint = arguments["hint"]?.toString()?.trim('"') ?: ""
+            autoFillInputAction(normalized, hint)
+        }
+        "auto_click_button" -> autoClickButtonAction(normalized)
+        "voice_read" -> voiceReadAction(normalized)
 
         else -> error("未知自动模式工具：$name")
     }

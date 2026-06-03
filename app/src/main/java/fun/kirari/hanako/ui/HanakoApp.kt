@@ -96,6 +96,7 @@ import `fun`.kirari.hanako.overlay.OverlayService
 import `fun`.kirari.hanako.ui.components.CustomModelDialog
 import `fun`.kirari.hanako.ui.components.HeroSection
 import `fun`.kirari.hanako.ui.components.ModelPickerDialog
+import `fun`.kirari.hanako.util.FirstLaunchGuide
 
 enum class Screen(val title: String, val icon: ImageVector) {
     Hanako("Hanako", Icons.Default.Home),
@@ -161,6 +162,9 @@ fun HanakoApp(viewModel: MainViewModel) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+
+    // 首次启动引导
+    var showGuide by remember { mutableStateOf(FirstLaunchGuide.isFirstLaunch(context)) }
 
     DisposableEffect(lifecycleOwner, context) {
         val observer = LifecycleEventObserver { _, event ->
@@ -624,6 +628,25 @@ fun HanakoApp(viewModel: MainViewModel) {
                 TextButton(onClick = { showLiteDownloadDialog = false }) {
                     Text("取消")
                 }
+            }
+        )
+    }
+
+    // 首次启动引导
+    if (showGuide) {
+        FirstLaunchGuideDialog(
+            onDismiss = {
+                FirstLaunchGuide.markLaunched(context)
+                FirstLaunchGuide.markGuideCompleted(context)
+                showGuide = false
+            },
+            onOpenOverlayPermission = {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${context.packageName}")
+                    )
+                )
             }
         )
     }

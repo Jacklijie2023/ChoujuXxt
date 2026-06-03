@@ -55,6 +55,14 @@ internal fun OverlayPanel(
                 panelHeightPx = panelHeightPx
             )
         }
+
+        OverlaySheetMode.WEBVIEW -> {
+            WebViewSheet(
+                initialUrl = uiState.webViewUrl,
+                onClose = onDismiss,
+                onSearch = viewModel::searchInWebView
+            )
+        }
     }
 }
 

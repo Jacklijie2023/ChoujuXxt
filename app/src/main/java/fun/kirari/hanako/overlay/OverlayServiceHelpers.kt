@@ -22,11 +22,39 @@ internal fun OverlayService.buildNotification(): Notification {
         Intent(this, MainActivity::class.java),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
     )
+    // 截屏处理 Action
+    val captureIntent = Intent(this, OverlayService::class.java).apply {
+        action = OverlayService.ACTION_CAPTURE
+    }
+    val capturePendingIntent = PendingIntent.getService(
+        this, 1, captureIntent,
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+    // 无障碍提取 Action
+    val a11yIntent = Intent(this, OverlayService::class.java).apply {
+        action = OverlayService.ACTION_A11Y_EXTRACT
+    }
+    val a11yPendingIntent = PendingIntent.getService(
+        this, 2, a11yIntent,
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+    // 停止 Action
+    val stopIntent = Intent(this, OverlayService::class.java).apply {
+        action = OverlayService.ACTION_STOP
+    }
+    val stopPendingIntent = PendingIntent.getService(
+        this, 3, stopIntent,
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
     return NotificationCompat.Builder(this, OverlayService.CHANNEL_ID)
         .setContentTitle(getString(R.string.overlay_notification_title))
         .setContentText(getString(R.string.overlay_notification_text))
         .setSmallIcon(R.mipmap.ic_launcher_round)
         .setContentIntent(openIntent)
+        .addAction(0, "截屏处理", capturePendingIntent)
+        .addAction(0, "无障碍提取", a11yPendingIntent)
+        .addAction(0, "停止", stopPendingIntent)
         .setOngoing(true)
         .build()
 }
@@ -47,6 +75,7 @@ internal fun OverlayService.notifyAutomationCompleted(label: String?) {
             )
         )
         .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        .setDefaults(NotificationCompat.DEFAULT_VIBRATE)
         .build()
     NotificationManagerCompat.from(this).notify(
         OverlayService.AUTOMATION_COMPLETE_NOTIFICATION_ID,

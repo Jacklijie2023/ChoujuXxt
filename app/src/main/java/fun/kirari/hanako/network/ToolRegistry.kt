@@ -34,6 +34,24 @@ internal object ToolRegistry {
             name = "show_bubble_letters",
             description = "在悬浮球上展示选项字母",
             params = listOf(ToolParam("text", "string", "1到4个大写英文字母", pattern = "^[A-Z]{1,4}$"))
+        ),
+        ToolDef(
+            name = "auto_fill_input",
+            description = "自动填写屏幕上的输入框",
+            params = listOf(
+                ToolParam("text", "string", "要填入输入框的内容"),
+                ToolParam("hint", "string", "输入框的提示文字或标签，用于定位目标输入框")
+            )
+        ),
+        ToolDef(
+            name = "auto_click_button",
+            description = "自动点击屏幕上的按钮",
+            params = listOf(ToolParam("text", "string", "按钮上显示的文字，用于定位目标按钮"))
+        ),
+        ToolDef(
+            name = "voice_read",
+            description = "用语音朗读答案内容",
+            params = listOf(ToolParam("text", "string", "要朗读的文本内容"))
         )
     )
 

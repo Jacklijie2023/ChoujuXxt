@@ -60,9 +60,11 @@ import `fun`.kirari.hanako.data.previewPrompt
 import `fun`.kirari.hanako.data.AutomationSettings
 import `fun`.kirari.hanako.data.ModelProviderConfig
 import `fun`.kirari.hanako.data.ModelPurpose
+import `fun`.kirari.hanako.data.ProcessingRoute
 import `fun`.kirari.hanako.data.ScreenCaptureMethod
 import `fun`.kirari.hanako.data.description
 import `fun`.kirari.hanako.data.displayName
+import `fun`.kirari.hanako.accessibility.HanakoAccessibilityService
 import `fun`.kirari.hanako.data.resolveModelName
 import `fun`.kirari.hanako.data.resolveModelProvider
 import `fun`.kirari.hanako.ui.components.AssistantSelector
@@ -113,6 +115,28 @@ fun SettingsMenuScreen(
                 subtitle = "自动模式、屏幕录制方式、网络兼容",
                 icon = Icons.Default.SmartToy,
                 onClick = onNavigateMore
+            )
+        }
+
+        item {
+            val isA11yRunning = remember { mutableStateOf(HanakoAccessibilityService.isRunning()) }
+            // 每次进入页面刷新状态
+            androidx.compose.runtime.DisposableEffect(Unit) {
+                isA11yRunning.value = HanakoAccessibilityService.isRunning()
+                onDispose {}
+            }
+            val context = LocalContext.current
+            SettingsEntryCard(
+                title = "无障碍服务",
+                subtitle = if (isA11yRunning.value) "✓ 已启用 — 可使用无障碍文本提取模式" else "未启用 — 点击前往系统设置开启",
+                icon = Icons.Default.Security,
+                onClick = {
+                    try {
+                        context.startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
+                    } catch (_: Exception) {}
+                }
             )
         }
     }

@@ -31,6 +31,11 @@ object AppDebugLogStore {
         append("I", tag, message)
     }
 
+    fun w(tag: String, message: String) {
+        Log.w(tag, message)
+        append("W", tag, message)
+    }
+
     fun e(tag: String, message: String, throwable: Throwable? = null) {
         Log.e(tag, message, throwable)
         append(

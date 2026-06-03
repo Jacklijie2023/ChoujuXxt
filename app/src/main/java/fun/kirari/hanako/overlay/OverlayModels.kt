@@ -12,7 +12,8 @@ internal const val SheetAnimationDurationMs = 260
 
 internal enum class OverlaySheetMode {
     CROP,
-    RESULT
+    RESULT,
+    WEBVIEW
 }
 
 internal enum class OverlayLaunchMode {
@@ -40,7 +41,8 @@ internal data class OverlayUiState(
     val launchMode: OverlayLaunchMode = OverlayLaunchMode.NORMAL,
     val autoRunState: AutoRunState = AutoRunState.IDLE,
     val autoCopiedLabel: String? = null,
-    val bubbleState: BubbleState = BubbleState.Idle
+    val bubbleState: BubbleState = BubbleState.Idle,
+    val webViewUrl: String = ""
 )
 
 

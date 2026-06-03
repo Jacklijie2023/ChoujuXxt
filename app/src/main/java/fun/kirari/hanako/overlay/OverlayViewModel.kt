@@ -84,6 +84,11 @@ internal class OverlayViewModel(
             processFullScreen()
             return
         }
+        // 无障碍模式：跳过截屏，直接提取文本并处理
+        if (_uiState.value.settings.processingRoute == ProcessingRoute.ACCESSIBILITY_TEXT) {
+            processAccessibilityDirect()
+            return
+        }
         viewModelScope.launch {
             runCatching {
                 `fun`.kirari.hanako.capture.ScreenCaptureManager.captureLatestBitmap(appContext, _uiState.value.settings.screenCaptureMethod)
@@ -120,6 +125,31 @@ internal class OverlayViewModel(
 
     fun processFullScreen() {
         AppDebugLogStore.i(tag, "processFullScreen start launchMode=${_uiState.value.launchMode}")
+        // 无障碍模式：直接提取文本处理，不需要截屏
+        if (_uiState.value.settings.processingRoute == ProcessingRoute.ACCESSIBILITY_TEXT) {
+            activeAutoProcessingJob?.cancel()
+            val job = viewModelScope.launch {
+                _uiState.update {
+                    it.copy(
+                        liveOcrText = "",
+                        liveAnswerText = "",
+                        result = null,
+                        error = null,
+                        working = true,
+                        sheetVisible = false,
+                        autoRunState = AutoRunState.RUNNING,
+                        autoCopiedLabel = null
+                    )
+                }
+                bubbleStateMachine.dispatch(BubbleEvent.StartProcessing)
+                processAccessibilityAutoBitmap()
+            }
+            activeAutoProcessingJob = job
+            job.invokeOnCompletion {
+                if (activeAutoProcessingJob === job) activeAutoProcessingJob = null
+            }
+            return
+        }
         activeAutoProcessingJob?.cancel()
         val job = viewModelScope.launch {
             _uiState.update {
@@ -224,6 +254,20 @@ internal class OverlayViewModel(
                                 }
                             )
                             pipeline.buildChatResult(baseResult, models, "", answer, historyId, screenshotPaths)
+                        }
+
+                        ProcessingRoute.ACCESSIBILITY_TEXT -> {
+                            pipeline.validateTextModels(models)
+                            val (extractedText, answer) = pipeline.streamAccessibilityThenChat(
+                                models = models,
+                                onTextDelta = { delta ->
+                                    _uiState.update { current -> current.copy(liveOcrText = current.liveOcrText + delta) }
+                                },
+                                onAnswerDelta = { delta ->
+                                    _uiState.update { current -> current.copy(liveAnswerText = current.liveAnswerText + delta) }
+                                }
+                            )
+                            pipeline.buildChatResult(baseResult, models, extractedText, answer, historyId, screenshotPaths)
                         }
                     }
                 }
@@ -489,10 +533,217 @@ internal class OverlayViewModel(
                 current.copy(
                     processingRoute = when (current.processingRoute) {
                         ProcessingRoute.OCR_THEN_LLM -> ProcessingRoute.MULTIMODAL_DIRECT
-                        ProcessingRoute.MULTIMODAL_DIRECT -> ProcessingRoute.OCR_THEN_LLM
+                        ProcessingRoute.MULTIMODAL_DIRECT -> ProcessingRoute.ACCESSIBILITY_TEXT
+                        ProcessingRoute.ACCESSIBILITY_TEXT -> ProcessingRoute.OCR_THEN_LLM
                     }
                 )
             }
+        }
+    }
+
+    fun setProcessingRoute(route: ProcessingRoute) {
+        viewModelScope.launch {
+            repository.update { current -> current.copy(processingRoute = route) }
+        }
+    }
+
+    fun openWebView(url: String = "") {
+        AppDebugLogStore.i(tag, "openWebView url=$url")
+        _uiState.update {
+            it.copy(
+                webViewUrl = url.ifBlank { "https://cn.bing.com" },
+                sheetVisible = true,
+                sheetMode = OverlaySheetMode.WEBVIEW
+            )
+        }
+    }
+
+    fun searchInWebView(query: String) {
+        val url = if (query.startsWith("http://") || query.startsWith("https://")) {
+            query
+        } else {
+            "https://cn.bing.com/search?q=${java.net.URLEncoder.encode(query, "UTF-8")}"
+        }
+        _uiState.update { it.copy(webViewUrl = url) }
+    }
+
+    /**
+     * 处理用户输入（检查是否为快速命令）
+     * @return true 如果是命令已处理，false 如果是普通文本需要发送给 LLM
+     */
+    fun processUserInput(input: String): Boolean {
+        val result = QuickCommands.process(input, _uiState.value.settings) ?: return false
+        AppDebugLogStore.i(tag, "QuickCommand: ${input.take(20)} -> ${result.message.take(30)}")
+
+        // 执行命令动作
+        when (val action = result.action) {
+            is QuickCommands.CommandAction.ClearHistory -> {
+                viewModelScope.launch { repository.update { it.copy(history = emptyList(), lastResult = null) } }
+            }
+            is QuickCommands.CommandAction.SwitchModel -> {
+                // 查找匹配的模型
+                val providers = _uiState.value.settings.providers
+                for (provider in providers) {
+                    val models = listOf(provider.chatModel, provider.visionModel, provider.ocrModel)
+                    if (models.any { it.contains(action.modelQuery, ignoreCase = true) }) {
+                        updateModelSelection(action.purpose, ModelSelection(providerId = provider.id, model = action.modelQuery))
+                        break
+                    }
+                }
+            }
+            is QuickCommands.CommandAction.SetPrompt -> {
+                viewModelScope.launch {
+                    repository.update { current ->
+                        val assistants = current.assistants.map {
+                            if (it.id == current.selectedAssistantId) it.copy(textPrompt = action.prompt) else it
+                        }
+                        current.copy(assistants = assistants)
+                    }
+                }
+            }
+            is QuickCommands.CommandAction.OpenWebView -> {
+                openWebView(action.url)
+            }
+            is QuickCommands.CommandAction.SearchWeb -> {
+                openWebView("https://cn.bing.com/search?q=${java.net.URLEncoder.encode(action.query, "UTF-8")}")
+            }
+            else -> {}
+        }
+
+        // 显示命令结果
+        _uiState.update { it.copy(error = result.message) }
+        return true
+    }
+
+    /**
+     * 无障碍模式直接处理：无需截屏，直接从屏幕提取文本并发送给 LLM。
+     */
+    private fun processAccessibilityDirect() {
+        AppDebugLogStore.i(tag, "processAccessibilityDirect start")
+        activeAutoProcessingJob?.cancel()
+        val job = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    liveOcrText = "",
+                    liveAnswerText = "",
+                    result = null,
+                    error = null,
+                    working = true,
+                    sheetVisible = true,
+                    sheetMode = OverlaySheetMode.RESULT,
+                    autoRunState = AutoRunState.IDLE,
+                    autoCopiedLabel = null
+                )
+            }
+
+            val state = _uiState.value
+            val models = runCatching { pipeline.resolveModels(state) }.getOrElse { error ->
+                _uiState.update { it.copy(working = false, error = error.message) }
+                return@launch
+            }
+
+            val baseResult = ProcessingResult(
+                id = java.util.UUID.randomUUID().toString(),
+                assistantName = models.assistant.name,
+                route = ProcessingRoute.ACCESSIBILITY_TEXT,
+                status = ProcessingStatus.RUNNING,
+                modelSummary = buildModelSummaryLocal(models.textModel, models.textProvider?.name),
+                detail = "无障碍提取已开始",
+                events = listOf(ProcessingEvent(title = "请求开始", detail = "无障碍文本提取模式"))
+            )
+            upsertHistory(baseResult)
+
+            runCatching {
+                withTimeout(processingTimeoutMillis) {
+                    pipeline.validateTextModels(models)
+                    val (extractedText, answer) = pipeline.streamAccessibilityThenChat(
+                        models = models,
+                        onTextDelta = { delta ->
+                            _uiState.update { current -> current.copy(liveOcrText = current.liveOcrText + delta) }
+                        },
+                        onAnswerDelta = { delta ->
+                            _uiState.update { current -> current.copy(liveAnswerText = current.liveAnswerText + delta) }
+                        }
+                    )
+                    pipeline.buildChatResult(baseResult, models, extractedText, answer, baseResult.id, emptyList())
+                }
+            }.onSuccess { result ->
+                AppDebugLogStore.i(tag, "processAccessibilityDirect success answerLength=${result.answer.length}")
+                upsertHistory(result)
+                _uiState.update {
+                    it.copy(
+                        working = false,
+                        result = result,
+                        liveOcrText = result.extractedText,
+                        liveAnswerText = result.answer
+                    )
+                }
+            }.onFailure { error ->
+                AppDebugLogStore.e(tag, "processAccessibilityDirect failed", error)
+                handleError(error, baseResult)
+            }
+        }
+        activeAutoProcessingJob = job
+        job.invokeOnCompletion {
+            if (activeAutoProcessingJob === job) activeAutoProcessingJob = null
+        }
+    }
+
+    private fun buildModelSummaryLocal(model: String, providerName: String?): String {
+        val trimmedModel = model.trim()
+        val trimmedProvider = providerName?.trim().orEmpty()
+        if (trimmedModel.isBlank()) return ""
+        return if (trimmedProvider.isBlank()) trimmedModel else "$trimmedModel（$trimmedProvider）"
+    }
+
+    /**
+     * 自动模式下的无障碍处理：直接提取文本并执行自动化动作。
+     */
+    private suspend fun processAccessibilityAutoBitmap() {
+        val state = _uiState.value
+        AppDebugLogStore.i(tag, "processAccessibilityAutoBitmap start")
+
+        val models = runCatching { pipeline.resolveModels(state) }.getOrElse { error ->
+            _uiState.update { it.copy(working = false, autoRunState = AutoRunState.IDLE, error = error.message) }
+            bubbleStateMachine.forceState(BubbleState.Idle)
+            return
+        }
+        val baseResult = ProcessingResult(
+            id = java.util.UUID.randomUUID().toString(),
+            assistantName = models.assistant.name,
+            route = ProcessingRoute.ACCESSIBILITY_TEXT,
+            status = ProcessingStatus.RUNNING,
+            modelSummary = buildModelSummaryLocal(models.textModel, models.textProvider?.name),
+            detail = "无障碍自动流程已开始",
+            events = listOf(ProcessingEvent(title = "请求开始", detail = "无障碍文本提取自动模式"))
+        )
+        upsertHistory(baseResult)
+
+        runCatching<Pair<`fun`.kirari.hanako.data.AutomationActionRecord, ProcessingResult>> {
+            withTimeout(processingTimeoutMillis) {
+                pipeline.validateTextModels(models)
+                val (extractedText, automationResult) = pipeline.streamAccessibilityThenAutomation(
+                    models = models,
+                    onTextDelta = { delta ->
+                        _uiState.update { current -> current.copy(liveOcrText = current.liveOcrText + delta) }
+                    },
+                    onThoughtDelta = { delta ->
+                        _uiState.update { current -> current.copy(liveAnswerText = current.liveAnswerText + delta) }
+                    }
+                )
+                pipeline.buildAutomationResult(baseResult, models, extractedText, automationResult, baseResult.id, emptyList())
+            }
+        }.onSuccess { (action, result) ->
+            AppDebugLogStore.i(tag, "processAccessibilityAutoBitmap success action=${action.type}")
+            upsertHistory(result)
+            handleAutomationAction(action, result, null)
+        }.onFailure { error ->
+            if (error is CancellationException) {
+                AppDebugLogStore.i(tag, "processAccessibilityAutoBitmap cancelled")
+                return
+            }
+            AppDebugLogStore.e(tag, "processAccessibilityAutoBitmap failed", error)
+            handleError(error, baseResult, isAutoMode = true)
         }
     }
 
@@ -542,44 +793,27 @@ internal class OverlayViewModel(
                         )
                         pipeline.buildAutomationResult(baseResult, models, "", automationResult, historyId, screenshotPaths)
                     }
+
+                    ProcessingRoute.ACCESSIBILITY_TEXT -> {
+                        pipeline.validateTextModels(models)
+                        val (extractedText, automationResult) = pipeline.streamAccessibilityThenAutomation(
+                            models = models,
+                            onTextDelta = { delta ->
+                                _uiState.update { current -> current.copy(liveOcrText = current.liveOcrText + delta) }
+                            },
+                            onThoughtDelta = { delta ->
+                                _uiState.update { current -> current.copy(liveAnswerText = current.liveAnswerText + delta) }
+                            }
+                        )
+                        pipeline.buildAutomationResult(baseResult, models, extractedText, automationResult, historyId, screenshotPaths)
+                    }
                 }
                 AppDebugLogStore.i(tag, "processAutoBitmaps gateway success resultId=${result.id} action=${action.type}")
                 upsertHistory(result)
                 action to result
             }
         }.onSuccess { (action, result) ->
-            when (action.type) {
-                AutomationActionType.SET_CLIPBOARD -> {
-                    _uiState.update {
-                        it.copy(
-                            screenshot = firstBitmap,
-                            selectedBitmap = firstBitmap,
-                            working = false,
-                            result = result,
-                            liveAnswerText = result.automationThought,
-                            autoRunState = AutoRunState.COMPLETED,
-                            autoCopiedLabel = action.text,
-                            error = null
-                        )
-                    }
-                    bubbleStateMachine.dispatch(BubbleEvent.CopyComplete(action.text))
-                }
-                AutomationActionType.SHOW_BUBBLE_LETTERS -> {
-                    _uiState.update {
-                        it.copy(
-                            screenshot = firstBitmap,
-                            selectedBitmap = firstBitmap,
-                            working = false,
-                            result = result,
-                            liveAnswerText = result.automationThought,
-                            autoRunState = AutoRunState.COMPLETED,
-                            autoCopiedLabel = null,
-                            error = null
-                        )
-                    }
-                    bubbleStateMachine.dispatch(BubbleEvent.LettersComplete(action.text))
-                }
-            }
+            handleAutomationAction(action, result, firstBitmap)
         }.onFailure { error ->
             if (error is CancellationException) {
                 AppDebugLogStore.i(tag, "processAutoBitmaps cancelled")
@@ -587,6 +821,90 @@ internal class OverlayViewModel(
             }
             AppDebugLogStore.e(tag, "processAutoBitmaps failed", error)
             handleError(error, baseResult, isAutoMode = true)
+        }
+    }
+
+    /**
+     * 统一处理自动化动作
+     */
+    private fun handleAutomationAction(
+        action: `fun`.kirari.hanako.data.AutomationActionRecord,
+        result: ProcessingResult,
+        bitmap: Bitmap?
+    ) {
+        when (action.type) {
+            AutomationActionType.SET_CLIPBOARD -> {
+                _uiState.update {
+                    it.copy(
+                        screenshot = bitmap ?: it.screenshot,
+                        selectedBitmap = bitmap ?: it.selectedBitmap,
+                        working = false,
+                        result = result,
+                        liveAnswerText = result.automationThought,
+                        autoRunState = AutoRunState.COMPLETED,
+                        autoCopiedLabel = action.text,
+                        error = null
+                    )
+                }
+                bubbleStateMachine.dispatch(BubbleEvent.CopyComplete(action.text))
+            }
+            AutomationActionType.SHOW_BUBBLE_LETTERS -> {
+                _uiState.update {
+                    it.copy(
+                        screenshot = bitmap ?: it.screenshot,
+                        selectedBitmap = bitmap ?: it.selectedBitmap,
+                        working = false,
+                        result = result,
+                        liveAnswerText = result.automationThought,
+                        autoRunState = AutoRunState.COMPLETED,
+                        autoCopiedLabel = null,
+                        error = null
+                    )
+                }
+                bubbleStateMachine.dispatch(BubbleEvent.LettersComplete(action.text))
+            }
+            AutomationActionType.AUTO_FILL_INPUT -> {
+                val success = `fun`.kirari.hanako.accessibility.AccessibilityActions.autoFillInput(action.extra, action.text)
+                _uiState.update {
+                    it.copy(
+                        working = false,
+                        result = result,
+                        liveAnswerText = if (success) "已自动填写: ${action.text}" else "自动填写失败",
+                        autoRunState = AutoRunState.COMPLETED,
+                        autoCopiedLabel = null,
+                        error = if (success) null else "未找到匹配的输入框"
+                    )
+                }
+                bubbleStateMachine.forceState(`fun`.kirari.hanako.automation.BubbleState.Idle)
+            }
+            AutomationActionType.AUTO_CLICK_BUTTON -> {
+                val success = `fun`.kirari.hanako.accessibility.AccessibilityActions.autoClickButton(action.text)
+                _uiState.update {
+                    it.copy(
+                        working = false,
+                        result = result,
+                        liveAnswerText = if (success) "已点击: ${action.text}" else "自动点击失败",
+                        autoRunState = AutoRunState.COMPLETED,
+                        autoCopiedLabel = null,
+                        error = if (success) null else "未找到匹配的按钮"
+                    )
+                }
+                bubbleStateMachine.forceState(`fun`.kirari.hanako.automation.BubbleState.Idle)
+            }
+            AutomationActionType.VOICE_READ -> {
+                TtsHelper.speak(action.text)
+                _uiState.update {
+                    it.copy(
+                        working = false,
+                        result = result,
+                        liveAnswerText = "正在朗读...",
+                        autoRunState = AutoRunState.COMPLETED,
+                        autoCopiedLabel = null,
+                        error = null
+                    )
+                }
+                bubbleStateMachine.forceState(`fun`.kirari.hanako.automation.BubbleState.Idle)
+            }
         }
     }
 

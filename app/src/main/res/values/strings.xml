@@ -5,4 +5,5 @@
     <string name="capture_notification_title">Hanako 正在准备屏幕捕捉</string>
     <string name="capture_notification_text">请在系统弹窗中允许屏幕共享</string>
     <string name="overlay_automation_done_title">Hanako 自动模式已完成</string>
+    <string name="accessibility_service_description">Hanako 无障碍服务，用于从屏幕 UI 节点中直接提取文本，无需截屏即可获取屏幕文字内容。</string>
 </resources>

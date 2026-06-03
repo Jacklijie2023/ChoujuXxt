@@ -19,3 +19,22 @@ internal fun clipboardAction(text: String): AutomationActionRecord =
         type = AutomationActionType.SET_CLIPBOARD,
         text = text
     )
+
+internal fun autoFillInputAction(text: String, hint: String): AutomationActionRecord =
+    AutomationActionRecord(
+        type = AutomationActionType.AUTO_FILL_INPUT,
+        text = text,
+        extra = hint
+    )
+
+internal fun autoClickButtonAction(text: String): AutomationActionRecord =
+    AutomationActionRecord(
+        type = AutomationActionType.AUTO_CLICK_BUTTON,
+        text = text
+    )
+
+internal fun voiceReadAction(text: String): AutomationActionRecord =
+    AutomationActionRecord(
+        type = AutomationActionType.VOICE_READ,
+        text = text
+    )
