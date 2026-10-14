@@ -9,6 +9,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -50,27 +52,23 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DrawerState
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -132,16 +130,14 @@ internal fun ChatScreen(
     var input by rememberSaveable { mutableStateOf("") }
     var panelExpanded by rememberSaveable { mutableStateOf(false) }
     val listState = rememberLazyListState()
-    // 不使用 rememberDrawerState：其内部为 rememberSaveable，会把「已展开」状态持久化到 pager
-    // 页的 saveable 容器；切到其它 Tab 再回来时会自动恢复为展开，导致抽屉卡住/切页闪现，
-    // 且只有重启进程才能清除。这里用普通 remember，保证每次进入聊天页都从「收起」开始。
-    val drawerState = remember { DrawerState(DrawerValue.Closed) }
-    val scope = rememberCoroutineScope()
+    // 历史抽屉开关：用普通 remember（非 rememberSaveable），避免「已展开」状态跨 Tab 被恢复。
+    var showDrawer by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
-    // 聊天页失活（切到其它 Tab）时立即收起抽屉，避免切页动画中残留显示。
-    LaunchedEffect(isActive) {
-        if (!isActive) drawerState.snapTo(DrawerValue.Closed)
+    // 离开聊天页时立即收起抽屉（DisposableEffect 在组合提交后同步执行，不留残留帧）。
+    DisposableEffect(isActive) {
+        if (!isActive) showDrawer = false
+        onDispose { }
     }
 
     // 相册读取权限（输入面板展开时按需检查与请求）。
@@ -163,33 +159,9 @@ internal fun ChatScreen(
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet {
-                SessionHistoryDrawer(
-                    // 仅展示「已使用」的会话（有消息）；空的新会话不进入历史列表。
-                    sessions = sessions.filter { it.messages.isNotEmpty() },
-                    currentSessionId = session.id,
-                    onClose = { scope.launch { drawerState.close() } },
-                    onSelect = { id ->
-                        holder.selectSession(id)
-                        scope.launch { drawerState.close() }
-                    },
-                    onRename = holder::renameSession,
-                    onDelete = holder::deleteSession,
-                    onDeleteSessions = holder::deleteSessions,
-                    onTogglePin = holder::togglePin,
-                    onNew = {
-                        holder.newSession()
-                        scope.launch { drawerState.close() }
-                    }
-                )
-            }
-        }
-    ) {
+    Box(modifier = modifier.fillMaxSize()) {
         Column(
-            modifier = modifier
+            modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
         ) {
@@ -201,7 +173,7 @@ internal fun ChatScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                IconButton(onClick = { showDrawer = true }) {
                     Icon(Icons.Default.Menu, contentDescription = "对话历史")
                 }
                 ModelChip(
@@ -330,6 +302,52 @@ internal fun ChatScreen(
                             photoPermissionLauncher.launch(photoReadPermission())
                         },
                         modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            }
+        }
+
+        // 历史抽屉覆盖层：窗口内覆盖渲染，不创建新窗口、不参与横向滑动手势，
+        // 从根上规避 ModalNavigationDrawer 与 HorizontalPager 的手势冲突（边缘拖拽抢占
+        // 分页动画会导致分页停在半路、抽屉残留且只有重启才能清除）。isActive 为 false
+        // 时不渲染，保证切到其它 Tab 后不会残留或闪现。
+        AnimatedVisibility(
+            visible = showDrawer && isActive,
+            enter = slideInHorizontally { -it } + fadeIn(),
+            exit = slideOutHorizontally { -it } + fadeOut()
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                // 右侧遮罩：点击关闭抽屉。
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.32f))
+                        .clickable { showDrawer = false }
+                )
+                Surface(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.86f)
+                        .widthIn(max = 360.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                ) {
+                    SessionHistoryDrawer(
+                        // 仅展示「已使用」的会话（有消息）；空的新会话不进入历史列表。
+                        sessions = sessions.filter { it.messages.isNotEmpty() },
+                        currentSessionId = session.id,
+                        onClose = { showDrawer = false },
+                        onSelect = { id ->
+                            holder.selectSession(id)
+                            showDrawer = false
+                        },
+                        onRename = holder::renameSession,
+                        onDelete = holder::deleteSession,
+                        onDeleteSessions = holder::deleteSessions,
+                        onTogglePin = holder::togglePin,
+                        onNew = {
+                            holder.newSession()
+                            showDrawer = false
+                        }
                     )
                 }
             }

@@ -740,16 +740,18 @@ private fun MainShellScreen(
 
     var isAnimating by remember { mutableStateOf(false) }
 
-    // 用户点击tab时触发动画
+    // 目标页变化时对齐分页位置。
+    // 注意：这里不能用 `target != pagerState.currentPage` 做跳过判断——当分页动画中途被打断
+    // （例如快速连点 Tab / 与抽屉手势冲突）时，页面会停在一个非整页的中间偏移上，而此时
+    // currentPage 可能已等于目标页，导致动画被跳过、页面永久卡在中间（只有重启才能恢复）。
+    // 无条件调用 animateScrollToPage 可保证任何中间偏移都会被重新对齐到目标页。
     LaunchedEffect(currentScreen) {
         val target = currentScreen.ordinal
-        if (target != pagerState.currentPage) {
-            isAnimating = true
-            try {
-                pagerState.animateScrollToPage(target)
-            } finally {
-                isAnimating = false
-            }
+        isAnimating = true
+        try {
+            pagerState.animateScrollToPage(target)
+        } finally {
+            isAnimating = false
         }
     }
 
