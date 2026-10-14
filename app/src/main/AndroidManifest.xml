@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- 聊天输入区「按住说话」：调用系统语音识别服务实时转文字。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 聊天输入面板「相册」：展示手机照片与相册分类（仅浏览与选择，不发送图片）。 -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission

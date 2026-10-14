@@ -1,11 +1,15 @@
 package `fun`.kirari.hanako.ui
 
-import android.app.Activity
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Bundle
 import android.provider.OpenableColumns
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -44,20 +48,23 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -96,11 +103,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import `fun`.kirari.hanako.chat.ChatModelCatalog
@@ -199,17 +208,61 @@ internal fun ChatScreen(
         }
     }
 
-    // 语音输入：拉起系统语音识别（RecognizerIntent），识别结果写入输入框。
-    val speechLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val recognized = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!recognized.isNullOrBlank()) {
-                input = if (input.isBlank()) recognized else "$input $recognized"
+    // 语音输入（图 3）：按住说话，调用系统 SpeechRecognizer 实时转文字（partial 结果边听边显示）。
+    var isInputFocused by remember { mutableStateOf(false) }
+    var voiceMode by rememberSaveable { mutableStateOf(false) }
+    var isListening by remember { mutableStateOf(false) }
+    var speechPartial by remember { mutableStateOf("") }
+    var hasRecordPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val recordPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasRecordPermission = granted
+        if (granted) {
+            voiceMode = true
+        } else {
+            Toast.makeText(context, "缺少录音权限，无法语音输入", Toast.LENGTH_SHORT).show()
+        }
+    }
+    val voiceSession = remember {
+        VoiceInputSession(
+            context = context,
+            onPartial = { speechPartial = it },
+            onResult = { text ->
+                input = if (input.isBlank()) text else "$input $text"
+                speechPartial = ""
+                isListening = false
+            },
+            onError = { message ->
+                speechPartial = ""
+                isListening = false
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
             }
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { voiceSession.release() }
+    }
+    // 按住：开始录音识别；无权限时先申请。
+    val startListening: () -> Unit = {
+        if (hasRecordPermission) {
+            speechPartial = ""
+            isListening = true
+            voiceSession.start()
+        } else {
+            recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+    // 松开（commit = true 提交识别结果）/ 取消（commit = false 丢弃）。
+    val stopListening: (Boolean) -> Unit = { commit ->
+        if (isListening) {
+            isListening = false
+            if (commit) voiceSession.stop() else voiceSession.cancel()
         }
     }
 
@@ -396,103 +449,176 @@ internal fun ChatScreen(
                 }
             }
 
-            // 大圆角输入容器：「+」（点击旋转 45° 变 ×）/ 输入框 / 麦克风 / 发送或停止
+            // 大圆角输入容器（图 1/2/3/4）：语音键 / 输入框 / 拍照 / 「+」（点击旋转 90° 变 ×）/ 发送。
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 8.dp)
                     .imePadding()
             ) {
+                val plusRotation by animateFloatAsState(
+                    targetValue = if (panelExpanded) 45f else 0f,
+                    label = "plusRotation"
+                )
+                val hasContent = input.isNotBlank()
+
+                // 「+」功能键：点击旋转 90°（+ → ×）并展开输入功能面板；面板与键盘互斥。
+                val plusButton: @Composable () -> Unit = {
+                    IconButton(
+                        onClick = {
+                            if (panelExpanded) {
+                                panelExpanded = false
+                            } else {
+                                focusManager.clearFocus()
+                                panelExpanded = true
+                            }
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = if (panelExpanded) "收起输入功能" else "展开输入功能",
+                            modifier = Modifier.rotate(plusRotation)
+                        )
+                    }
+                }
+
+                // 拍照功能键：真实拉起系统相机，结果写入 FileProvider Uri。
+                val cameraButton: @Composable () -> Unit = {
+                    IconButton(
+                        onClick = {
+                            val uri = createCameraImageUri(context)
+                            cameraUri = uri
+                            runCatching { takePictureLauncher.launch(uri) }
+                                .onFailure {
+                                    Toast.makeText(
+                                        context,
+                                        "未找到可用的相机应用",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                        }
+                    ) {
+                        Icon(Icons.Default.PhotoCamera, contentDescription = "拍照")
+                    }
+                }
+
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(28.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerHigh
                 ) {
-                    Row(
-                        modifier = Modifier.padding(start = 4.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        val plusRotation by animateFloatAsState(
-                            targetValue = if (panelExpanded) 45f else 0f,
-                            label = "plusRotation"
-                        )
-                        IconButton(
-                            onClick = {
-                                if (panelExpanded) {
-                                    panelExpanded = false
-                                } else {
-                                    // 展开「+」面板时先收起键盘：键盘与面板互斥，不共存。
-                                    focusManager.clearFocus()
-                                    panelExpanded = true
-                                }
-                            }
+                    if (voiceMode) {
+                        // 图 3：键盘切换键 + 「按住 说话」 + 拍照 + 「+」。
+                        Row(
+                            modifier = Modifier.padding(
+                                start = 4.dp,
+                                end = 8.dp,
+                                top = 4.dp,
+                                bottom = 4.dp
+                            ),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Icon(
-                                Icons.Default.Add,
-                                contentDescription = if (panelExpanded) "收起输入功能" else "展开输入功能",
-                                modifier = Modifier.rotate(plusRotation)
-                            )
-                        }
-                        OutlinedTextField(
-                            value = input,
-                            onValueChange = { input = it },
-                            modifier = Modifier
-                                .weight(1f)
-                                .onFocusChanged { state ->
-                                    // 点输入框唤起键盘时，自动收起「+」面板（与键盘互斥）。
-                                    if (state.isFocused && panelExpanded) panelExpanded = false
-                                },
-                            placeholder = { Text("询问任何问题…") },
-                            shape = RoundedCornerShape(28.dp),
-                            maxLines = 4,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                focusedBorderColor = Color.Transparent,
-                                unfocusedBorderColor = Color.Transparent
-                            )
-                        )
-                        IconButton(
-                            onClick = {
-                                // 真实拉起系统语音识别：识别结果回填到输入框。
-                                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                    putExtra(
-                                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                                    )
-                                    putExtra(
-                                        RecognizerIntent.EXTRA_LANGUAGE,
-                                        Locale.getDefault().toLanguageTag()
-                                    )
-                                    putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出你的问题")
-                                }
-                                runCatching { speechLauncher.launch(intent) }
-                                    .onFailure {
-                                        Toast.makeText(
-                                            context,
-                                            "未找到可用的语音识别服务",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    }
-                            }
-                        ) {
-                            Icon(Icons.Default.Mic, contentDescription = "语音输入")
-                        }
-                        if (isStreaming) {
-                            IconButton(onClick = { holder.stop() }) {
-                                Icon(Icons.Default.Stop, contentDescription = "停止")
-                            }
-                        } else {
                             IconButton(
                                 onClick = {
-                                    val text = input
-                                    input = ""
-                                    holder.send(text)
-                                },
-                                enabled = input.isNotBlank()
+                                    stopListening(false)
+                                    voiceMode = false
+                                }
                             ) {
-                                Icon(Icons.Default.Send, contentDescription = "发送")
+                                Icon(Icons.Default.Keyboard, contentDescription = "切换到键盘输入")
+                            }
+                            HoldToTalkBar(
+                                listening = isListening,
+                                partialText = speechPartial,
+                                onStart = { startListening() },
+                                onStop = { stopListening(true) },
+                                onCancel = { stopListening(false) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            cameraButton()
+                            plusButton()
+                        }
+                    } else {
+                        // 图 1/2/4：语音键 + 输入框 + 拍照 / 「+」 / 发送。
+                        // 聚焦时输入框变高（minLines 2）且功能键下沉到盒子底部（Alignment.Bottom）；
+                        // 未聚焦时单行（图 2）。TextField 始终占用同一插槽，避免重建导致焦点丢失抖动。
+                        Row(
+                            modifier = Modifier.padding(
+                                start = 4.dp,
+                                end = 8.dp,
+                                top = 4.dp,
+                                bottom = 4.dp
+                            ),
+                            verticalAlignment = Alignment.Bottom,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            IconButton(
+                                onClick = {
+                                    focusManager.clearFocus()
+                                    if (hasRecordPermission) {
+                                        voiceMode = true
+                                    } else {
+                                        recordPermissionLauncher.launch(
+                                            Manifest.permission.RECORD_AUDIO
+                                        )
+                                    }
+                                }
+                            ) {
+                                Icon(Icons.Default.GraphicEq, contentDescription = "语音输入")
+                            }
+                            OutlinedTextField(
+                                value = input,
+                                onValueChange = { input = it },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .onFocusChanged { state ->
+                                        isInputFocused = state.isFocused
+                                        // 点输入框唤起键盘时，自动收起「+」面板（与键盘互斥）。
+                                        if (state.isFocused && panelExpanded) panelExpanded = false
+                                    },
+                                placeholder = {
+                                    Text(if (isInputFocused) "发消息…" else "发消息或按住说话…")
+                                },
+                                shape = RoundedCornerShape(22.dp),
+                                singleLine = !isInputFocused,
+                                minLines = if (isInputFocused) 2 else 1,
+                                maxLines = 4,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent,
+                                    focusedBorderColor = Color.Transparent,
+                                    unfocusedBorderColor = Color.Transparent
+                                )
+                            )
+                            if (isStreaming) {
+                                IconButton(onClick = { holder.stop() }) {
+                                    Icon(Icons.Default.Stop, contentDescription = "停止")
+                                }
+                            } else if (hasContent) {
+                                // 图 4：有内容时相机位变成「+」，原「+」位变成向上箭头的发送键。
+                                plusButton()
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary)
+                                        .clickable {
+                                            val text = input
+                                            input = ""
+                                            holder.send(text)
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.ArrowUpward,
+                                        contentDescription = "发送",
+                                        tint = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            } else {
+                                cameraButton()
+                                plusButton()
                             }
                         }
                     }
@@ -550,6 +676,19 @@ internal fun ChatScreen(
                                 }
                         },
                         modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+
+                // 免责提示（图 2/3/4）：键盘未弹出（输入框未聚焦）时显示在输入框下方。
+                if (!isInputFocused) {
+                    Text(
+                        text = "内容由 AI 生成，请注意核实",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 6.dp)
                     )
                 }
             }
@@ -1476,3 +1615,178 @@ private fun stripMarkdownForSpeech(text: String): String =
     text.replace(Regex("[#*`>_~\\[\\]()]"), " ")
         .replace(Regex("\\s+"), " ")
         .trim()
+
+/**
+ * 「按住 说话」条（图 3）：按下开始识别、松开提交、手势取消则丢弃。
+ *
+ * @param listening 是否正在识别；@param partialText 实时识别到的半截文字（边听边显示）。
+ */
+@Composable
+private fun HoldToTalkBar(
+    listening: Boolean,
+    partialText: String,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val label = when {
+        listening && partialText.isNotBlank() -> partialText
+        listening -> "正在听…"
+        else -> "按住 说话"
+    }
+    Box(
+        modifier = modifier
+            .height(42.dp)
+            .clip(RoundedCornerShape(21.dp))
+            .background(
+                if (listening) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHigh
+                }
+            )
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        onStart()
+                        // tryAwaitRelease() 返回 true 表示正常松开（提交），false 表示手势被打断（丢弃）。
+                        if (tryAwaitRelease()) onStop() else onCancel()
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = if (listening) FontWeight.Normal else FontWeight.Medium,
+            color = if (listening && partialText.isNotBlank()) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 16.dp)
+        )
+    }
+}
+
+/**
+ * 语音输入会话（按住说话）：封装系统 [SpeechRecognizer] 的创建 / 识别 / 释放。
+ *
+ * 懒创建识别器（首次 [start] 时创建，必须发生在主线程）；[SpeechRecognizer] 需要
+ * 系统语音识别服务可用，否则通过 [onError] 回报中文提示。
+ */
+private class VoiceInputSession(
+    private val context: Context,
+    private val onPartial: (String) -> Unit,
+    private val onResult: (String) -> Unit,
+    private val onError: (String) -> Unit
+) {
+    private var recognizer: SpeechRecognizer? = null
+    private var released = false
+
+    // 用户主动松开 / 取消后，忽略「没听清」这类由停止触发的噪声错误。
+    private var stopping = false
+
+    private fun ensureRecognizer(): SpeechRecognizer? {
+        if (released) return null
+        recognizer?.let { return it }
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            onError("未找到可用的语音识别服务")
+            return null
+        }
+        val created = SpeechRecognizer.createSpeechRecognizer(context)
+        created.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                partialResults
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(onPartial)
+            }
+
+            override fun onResults(results: Bundle?) {
+                stopping = false
+                val text = results
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    .orEmpty()
+                if (text.isBlank()) onError("没有听清，请再说一次") else onResult(text)
+            }
+
+            override fun onError(error: Int) {
+                val ignore = stopping &&
+                    (error == SpeechRecognizer.ERROR_NO_MATCH ||
+                        error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
+                stopping = false
+                if (!ignore) onError(speechErrorMessage(error))
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        recognizer = created
+        return created
+    }
+
+    fun start() {
+        val target = ensureRecognizer() ?: return
+        stopping = false
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
+            // 实时返回半截识别结果，实现「边听边显示」。
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        runCatching { target.startListening(intent) }
+            .onFailure { onError("语音识别启动失败，请稍后重试") }
+    }
+
+    /** 松开：停止录音并提交已识别到的结果。 */
+    fun stop() {
+        stopping = true
+        runCatching { recognizer?.stopListening() }
+    }
+
+    /** 取消：丢弃本次识别。 */
+    fun cancel() {
+        stopping = true
+        recognizer?.let { runCatching { it.cancel() } }
+    }
+
+    /** 释放识别器（页面销毁时调用）。 */
+    fun release() {
+        released = true
+        recognizer?.let {
+            runCatching { it.cancel() }
+            runCatching { it.destroy() }
+        }
+        recognizer = null
+    }
+}
+
+/** 系统语音识别错误码 -> 中文提示。 */
+private fun speechErrorMessage(error: Int): String = when (error) {
+    SpeechRecognizer.ERROR_NO_MATCH -> "没有听清，请再说一次"
+    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没有检测到语音，请重试"
+    SpeechRecognizer.ERROR_AUDIO -> "录音出错，请检查麦克风"
+    SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "网络异常，语音识别失败"
+    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "缺少录音权限，无法语音输入"
+    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别服务忙，请稍后重试"
+    SpeechRecognizer.ERROR_SERVER -> "语音识别服务异常，请稍后重试"
+    else -> "语音识别失败，请重试"
+}
