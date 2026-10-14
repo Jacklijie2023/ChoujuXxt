@@ -54,6 +54,22 @@ internal class GoogleAdapter(
                     })
                 })
             }
+            // 联网搜索：Gemini 官方内建工具 googleSearch，仅在无自定义工具时注入（自动触发搜索，无需 toolConfig）。
+            // 第三方中转站的兼容性未验证，开启后若无效果或报错需向用户如实说明。
+            if (request.webSearch && request.tools == null) {
+                put("tools", buildJsonArray {
+                    add(buildJsonObject {
+                        put("googleSearch", buildJsonObject {})
+                    })
+                })
+            }
+            // 思考模式：Gemini 官方字段 thinkingConfig（thinkingBudget 为推理预算，仅对支持思考的模型生效）。
+            // 第三方中转站的兼容性未验证，开启后若无效果或报错需向用户如实说明。
+            if (request.thinking) {
+                put("thinkingConfig", buildJsonObject {
+                    put("thinkingBudget", 1024)
+                })
+            }
         }
 
         val url = "${request.provider.baseUrl.trimEnd('/')}/models/${request.model}:streamGenerateContent?alt=sse"

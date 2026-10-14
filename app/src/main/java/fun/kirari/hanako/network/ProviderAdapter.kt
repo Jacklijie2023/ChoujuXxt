@@ -10,6 +10,10 @@ internal data class StreamRequest(
     val userPrompt: String,
     val imagesBase64: List<String> = emptyList(),
     val tools: List<ToolDef>? = null,
+    /** 是否开启「联网搜索」（会话级开关）。真实能力是否生效取决于服务商支持，第三方中转站兼容性待验证。 */
+    val webSearch: Boolean = false,
+    /** 是否开启「思考模式」（会话级开关）。真实能力是否生效取决于服务商支持，第三方中转站兼容性待验证。 */
+    val thinking: Boolean = false,
     val firstDeltaTimeoutMillis: Long
 ) {
     val hasImages: Boolean get() = imagesBase64.isNotEmpty()

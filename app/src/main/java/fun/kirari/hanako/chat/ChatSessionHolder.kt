@@ -44,6 +44,8 @@ internal fun interface ChatStreamSource {
         systemPrompt: String,
         userPrompt: String,
         imagesBase64: List<String>,
+        webSearch: Boolean,
+        thinking: Boolean,
         firstDeltaTimeoutMillis: Long,
         trustAllHttpsCertificates: Boolean
     ): Flow<LlmEvent>
@@ -59,6 +61,8 @@ internal class UnifiedChatStreamSource(
         systemPrompt: String,
         userPrompt: String,
         imagesBase64: List<String>,
+        webSearch: Boolean,
+        thinking: Boolean,
         firstDeltaTimeoutMillis: Long,
         trustAllHttpsCertificates: Boolean
     ): Flow<LlmEvent> = client.stream(
@@ -68,6 +72,8 @@ internal class UnifiedChatStreamSource(
         userPrompt = userPrompt,
         imagesBase64 = imagesBase64,
         tools = null,
+        webSearch = webSearch,
+        thinking = thinking,
         firstDeltaTimeoutMillis = firstDeltaTimeoutMillis,
         trustAllHttpsCertificates = trustAllHttpsCertificates
     )
@@ -257,6 +263,22 @@ internal class ChatSessionHolder(
         }
     }
 
+    /** 切换当前会话的「联网搜索」开关（持久化，聊天页与迷你窗共享）。 */
+    fun setWebSearch(enabled: Boolean) {
+        val sessionId = _state.value.currentSession().id
+        updateState { container ->
+            container.updateSession(sessionId) { it.copy(webSearch = enabled) }
+        }
+    }
+
+    /** 切换当前会话的「思考模式」开关（持久化，聊天页与迷你窗共享）。 */
+    fun setThinking(enabled: Boolean) {
+        val sessionId = _state.value.currentSession().id
+        updateState { container ->
+            container.updateSession(sessionId) { it.copy(thinking = enabled) }
+        }
+    }
+
     /**
      * 重命名指定会话（空白标题忽略）。
      *
@@ -365,6 +387,8 @@ internal class ChatSessionHolder(
                     systemPrompt = config.systemPrompt,
                     userPrompt = prompt,
                     imagesBase64 = imagesBase64,
+                    webSearch = session.webSearch,
+                    thinking = session.thinking,
                     firstDeltaTimeoutMillis = firstDeltaTimeoutMillis,
                     trustAllHttpsCertificates = config.trustAllHttpsCertificates
                 ).collect { event ->

@@ -48,13 +48,13 @@ class ChatSessionHolderTest {
 
     private fun holder(scope: CoroutineScope, vararg streams: Flow<LlmEvent>): ChatSessionHolder {
         val queue = ArrayDeque(streams.toList())
-        val source = ChatStreamSource { _, _, _, _, _, _, _ -> queue.removeFirst() }
+        val source = ChatStreamSource { _, _, _, _, _, _, _, _, _ -> queue.removeFirst() }
         return ChatSessionHolder(streamSource = source, configProvider = { config }, scope = scope)
     }
 
     private fun holderWithoutProvider(scope: CoroutineScope): ChatSessionHolder =
         ChatSessionHolder(
-            streamSource = ChatStreamSource { _, _, _, _, _, _, _ -> flowOf() },
+            streamSource = ChatStreamSource { _, _, _, _, _, _, _, _, _ -> flowOf() },
             configProvider = { config.copy(provider = null) },
             scope = scope
         )
@@ -333,7 +333,7 @@ class ChatSessionHolderTest {
         var capturedProvider: ModelProviderConfig? = null
         var capturedModel: String? = null
         val holder = ChatSessionHolder(
-            streamSource = ChatStreamSource { p, m, _, _, _, _, _ ->
+            streamSource = ChatStreamSource { p, m, _, _, _, _, _, _, _ ->
                 capturedProvider = p
                 capturedModel = m
                 flowOf(LlmEvent.Done)
@@ -357,7 +357,7 @@ class ChatSessionHolderTest {
         var capturedProvider: ModelProviderConfig? = null
         var capturedModel: String? = null
         val holder = ChatSessionHolder(
-            streamSource = ChatStreamSource { p, m, _, _, _, _, _ ->
+            streamSource = ChatStreamSource { p, m, _, _, _, _, _, _, _ ->
                 capturedProvider = p
                 capturedModel = m
                 flowOf(LlmEvent.Done)
@@ -371,6 +371,79 @@ class ChatSessionHolderTest {
 
         assertEquals(provider.id, capturedProvider?.id)
         assertEquals("test-model", capturedModel)
+    }
+
+    // ========================
+    // 联网搜索 / 思考模式（会话级开关）
+    // ========================
+
+    @Test
+    fun web_search_and_thinking_default_off_for_new_session() {
+        val scope = CoroutineScope(Dispatchers.Default)
+        val holder = holder(scope, flowOf(LlmEvent.Done))
+
+        assertFalse(holder.session.value.webSearch)
+        assertFalse(holder.session.value.thinking)
+    }
+
+    @Test
+    fun toggle_web_search_updates_session_and_persists() {
+        val scope = CoroutineScope(Dispatchers.Default)
+        val persistence = FakePersistence()
+        val holder = holderWithPersistence(scope, persistence, flowOf(LlmEvent.Done))
+
+        holder.setWebSearch(true)
+        val updated = awaitSession(holder) { it.webSearch }
+        assertTrue(updated.webSearch)
+
+        val persisted = runBlocking { persistence.load() }
+        assertTrue(persisted.sessions.first { it.id == updated.id }.webSearch)
+    }
+
+    @Test
+    fun toggle_thinking_updates_session_and_persists() {
+        val scope = CoroutineScope(Dispatchers.Default)
+        val persistence = FakePersistence()
+        val holder = holderWithPersistence(scope, persistence, flowOf(LlmEvent.Done))
+
+        holder.setThinking(true)
+        val updated = awaitSession(holder) { it.thinking }
+        assertTrue(updated.thinking)
+
+        val persisted = runBlocking { persistence.load() }
+        assertTrue(persisted.sessions.first { it.id == updated.id }.thinking)
+    }
+
+    @Test
+    fun stream_receives_current_web_search_and_thinking_flags() {
+        val scope = CoroutineScope(Dispatchers.Default)
+        var capturedWebSearch: Boolean? = null
+        var capturedThinking: Boolean? = null
+        val holder = ChatSessionHolder(
+            streamSource = ChatStreamSource { _, _, _, _, _, ws, th, _, _ ->
+                capturedWebSearch = ws
+                capturedThinking = th
+                flowOf(LlmEvent.Done)
+            },
+            configProvider = { config },
+            scope = scope
+        )
+
+        // 开启两个开关后发送，流式来源应收到 true。
+        holder.setWebSearch(true)
+        holder.setThinking(true)
+        holder.send("hi")
+        settle(holder)
+        assertEquals(true, capturedWebSearch)
+        assertEquals(true, capturedThinking)
+
+        // 关闭后再发送，流式来源应收到 false（开关按会话生效）。
+        holder.setWebSearch(false)
+        holder.setThinking(false)
+        holder.send("again")
+        settle(holder)
+        assertEquals(false, capturedWebSearch)
+        assertEquals(false, capturedThinking)
     }
 
     // ========================
@@ -393,7 +466,7 @@ class ChatSessionHolderTest {
         vararg streams: Flow<LlmEvent>
     ): ChatSessionHolder {
         val queue = ArrayDeque(streams.toList())
-        val source = ChatStreamSource { _, _, _, _, _, _, _ -> queue.removeFirst() }
+        val source = ChatStreamSource { _, _, _, _, _, _, _, _, _ -> queue.removeFirst() }
         return ChatSessionHolder(
             streamSource = source,
             configProvider = { config },

@@ -1,9 +1,7 @@
 package `fun`.kirari.hanako.ui
 
-import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,7 +27,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -189,45 +186,34 @@ internal fun ChatMessageItem(
 
         if (showQuickActions && message.status != ChatMessageStatus.Streaming) {
             Row(
-                modifier = Modifier.padding(start = 2.dp, top = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                QuickActionPill("思考模式") {
-                    Toast.makeText(context, "「思考模式」功能正在接入", Toast.LENGTH_SHORT).show()
-                }
-                QuickActionPill("联网搜索") {
-                    Toast.makeText(context, "「联网搜索」功能正在接入", Toast.LENGTH_SHORT).show()
-                }
-            }
-            Row(
-                modifier = Modifier.padding(start = 2.dp, top = 2.dp),
+                modifier = Modifier.padding(start = 2.dp, top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onCopy, modifier = Modifier.size(30.dp)) {
+                IconButton(onClick = onCopy, modifier = Modifier.size(36.dp)) {
                     Icon(
                         Icons.Default.ContentCopy,
                         contentDescription = "复制",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
-                IconButton(onClick = onRegenerate, modifier = Modifier.size(30.dp)) {
+                IconButton(onClick = onRegenerate, modifier = Modifier.size(36.dp)) {
                     Icon(
                         Icons.Default.Refresh,
                         contentDescription = "重新生成",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
                 IconButton(
                     onClick = { onSpeak(message.content) },
-                    modifier = Modifier.size(30.dp)
+                    modifier = Modifier.size(36.dp)
                 ) {
                     Icon(
                         Icons.Default.VolumeUp,
                         contentDescription = "语音播放",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -248,16 +234,4 @@ internal fun ChatMessageItem(
     }
 }
 
-/** AI 回复下方的品牌色文字快捷入口 pill。 */
-@Composable
-private fun QuickActionPill(label: String, onClick: () -> Unit) {
-    Text(
-        text = label,
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 4.dp)
-    )
-}
+

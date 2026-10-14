@@ -29,6 +29,22 @@ internal class OpenAiResponsesAdapter(
                 put("tool_choice", "required")
                 put("tools", ToolRegistry.formatForProvider(it, request.provider.kind))
             }
+            // 联网搜索：OpenAI Responses 官方内建工具 web_search_preview，仅在无自定义工具时注入。
+            // 第三方中转站的兼容性未验证，开启后若无效果或报错需向用户如实说明。
+            if (request.webSearch && request.tools == null) {
+                put("tools", buildJsonArray {
+                    add(buildJsonObject {
+                        put("type", "web_search_preview")
+                    })
+                })
+            }
+            // 思考模式：OpenAI Responses 官方字段 reasoning.effort（仅对支持推理的模型生效）。
+            // 第三方中转站的兼容性未验证，开启后若无效果或报错需向用户如实说明。
+            if (request.thinking) {
+                put("reasoning", buildJsonObject {
+                    put("effort", "high")
+                })
+            }
             put("input", buildJsonArray {
                 add(buildJsonObject {
                     put("role", "user")

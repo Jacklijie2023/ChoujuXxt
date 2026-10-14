@@ -49,7 +49,11 @@ data class ChatSession(
     val selectedProviderId: String? = null,
     val selectedModel: String = "",
     /** 是否置顶（历史抽屉排序用）。旧数据缺失时回退 false，保持向后兼容。 */
-    val pinned: Boolean = false
+    val pinned: Boolean = false,
+    /** 是否开启「联网搜索」（会话级，聊天页与迷你窗共享）。旧数据缺失时回退 false。 */
+    val webSearch: Boolean = false,
+    /** 是否开启「思考模式」（会话级，聊天页与迷你窗共享）。旧数据缺失时回退 false。 */
+    val thinking: Boolean = false
 ) {
     val isStreaming: Boolean
         get() = messages.any { it.status == ChatMessageStatus.Streaming }

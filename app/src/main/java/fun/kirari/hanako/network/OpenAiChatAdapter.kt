@@ -52,6 +52,11 @@ internal class OpenAiChatAdapter(
                 })
             })
             request.tools?.let { put("tools", ToolRegistry.formatForProvider(it, request.provider.kind)) }
+            // 思考模式：OpenAI o 系列官方字段 reasoning_effort（仅对支持该字段的模型生效）。
+            // 第三方中转站的兼容性未验证，开启后若无效果或报错需向用户如实说明。
+            if (request.thinking) {
+                put("reasoning_effort", "high")
+            }
         }
 
         val toolCalls = mutableMapOf<Int, PendingToolCall>()

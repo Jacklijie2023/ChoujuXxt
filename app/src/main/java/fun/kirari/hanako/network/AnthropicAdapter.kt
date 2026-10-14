@@ -34,6 +34,25 @@ internal class AnthropicAdapter(
                 put("tool_choice", buildJsonObject { put("type", "any") })
                 put("tools", ToolRegistry.formatForProvider(it, request.provider.kind))
             }
+            // 联网搜索：Anthropic 官方 server tool（web_search_20250305），仅在无自定义工具时注入。
+            // 第三方中转站的兼容性未验证，开启后若无效果或报错需向用户如实说明。
+            if (request.webSearch && request.tools == null) {
+                put("tools", buildJsonArray {
+                    add(buildJsonObject {
+                        put("type", "web_search_20250305")
+                        put("name", "web_search")
+                        put("max_uses", 25)
+                    })
+                })
+            }
+            // 思考模式：Anthropic 官方字段 thinking（budget_tokens 为推理预算，仅对支持思考的模型生效）。
+            // 第三方中转站的兼容性未验证，开启后若无效果或报错需向用户如实说明。
+            if (request.thinking) {
+                put("thinking", buildJsonObject {
+                    put("type", "enabled")
+                    put("budget_tokens", 4096)
+                })
+            }
             put("messages", buildJsonArray {
                 add(buildJsonObject {
                     put("role", "user")

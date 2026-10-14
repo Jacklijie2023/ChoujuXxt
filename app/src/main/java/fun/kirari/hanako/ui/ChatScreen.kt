@@ -113,6 +113,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
@@ -582,19 +583,12 @@ internal fun ChatScreen(
                             plusButton()
                         }
                     } else {
-                        // 图 1/2/4：语音键 + 输入框 + 拍照 / 「+」 / 发送。
-                        // 聚焦时输入框变高（minLines 2）且功能键下沉到盒子底部（Alignment.Bottom）；
-                        // 未聚焦时单行（图 2）。TextField 始终占用同一插槽，避免重建导致焦点丢失抖动。
-                        Row(
-                            modifier = Modifier.padding(
-                                start = 4.dp,
-                                end = 8.dp,
-                                top = 4.dp,
-                                bottom = 4.dp
-                            ),
-                            verticalAlignment = Alignment.Bottom,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
+                        // 图 1：未触发（未聚焦且无内容）→ 语音键 + 输入框 + 拍照 + 「+」水平单行。
+                        // 图 2/3：点击输入框 / 输入文字 / 流式中 → 双层结构：
+                        //   第一层全宽文本输入区；第二层 语音 / 拍照 / 「+」/ 发送，与第一层同左侧间距。
+                        // TextField 恒位于第一层同一代码槽位（不被条件兄弟挤动），避免重建导致焦点丢失抖动。
+                        val twoLayer = isInputFocused || hasContent || isStreaming
+                        val voiceButton: @Composable () -> Unit = {
                             IconButton(
                                 onClick = {
                                     focusManager.clearFocus()
@@ -621,55 +615,89 @@ internal fun ChatScreen(
                             ) {
                                 VoiceInputIcon()
                             }
-                            OutlinedTextField(
-                                value = input,
-                                onValueChange = { input = it },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .onFocusChanged { state ->
-                                        isInputFocused = state.isFocused
-                                        // 点输入框唤起键盘时，自动收起「+」面板（与键盘互斥）。
-                                        if (state.isFocused && panelExpanded) panelExpanded = false
-                                    },
-                                placeholder = {
-                                    Text(if (isInputFocused) "发消息…" else "发消息或按住说话…")
-                                },
-                                shape = RoundedCornerShape(22.dp),
-                                singleLine = !isInputFocused,
-                                minLines = if (isInputFocused) 2 else 1,
-                                maxLines = 4,
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedContainerColor = Color.Transparent,
-                                    unfocusedContainerColor = Color.Transparent,
-                                    focusedBorderColor = Color.Transparent,
-                                    unfocusedBorderColor = Color.Transparent
-                                )
-                            )
-                            if (isStreaming) {
-                                IconButton(onClick = { holder.stop() }) {
-                                    Icon(Icons.Default.Stop, contentDescription = "停止")
-                                }
-                            } else if (hasContent) {
-                                // 图 4：有内容时相机位变成「+」，原「+」位变成向上箭头的发送键。
-                                plusButton()
-                                Box(
+                        }
+                        Column {
+                            // 第一层：文本输入区（恒定槽位，全宽）。
+                            Row(
+                                modifier = Modifier.padding(
+                                    start = 4.dp,
+                                    end = 8.dp,
+                                    top = 4.dp,
+                                    bottom = if (twoLayer) 2.dp else 4.dp
+                                ),
+                                verticalAlignment = Alignment.Bottom,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                // 场景 1：语音键与输入框水平并排；场景 2/3 时语音下沉到第二层。
+                                if (!twoLayer) voiceButton()
+                                OutlinedTextField(
+                                    value = input,
+                                    onValueChange = { input = it },
                                     modifier = Modifier
-                                        .size(40.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primary)
-                                        .clickable { sendCurrent() },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        Icons.Default.ArrowUpward,
-                                        contentDescription = "发送",
-                                        tint = MaterialTheme.colorScheme.onPrimary,
-                                        modifier = Modifier.size(20.dp)
+                                        .weight(1f)
+                                        .onFocusChanged { state ->
+                                            isInputFocused = state.isFocused
+                                            // 点输入框唤起键盘时，自动收起「+」面板（与键盘互斥）。
+                                            if (state.isFocused && panelExpanded) panelExpanded = false
+                                        },
+                                    placeholder = {
+                                        Text(if (isInputFocused) "发消息…" else "发消息或按住说话…")
+                                    },
+                                    shape = RoundedCornerShape(22.dp),
+                                    singleLine = !isInputFocused,
+                                    minLines = if (isInputFocused) 2 else 1,
+                                    maxLines = 4,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedContainerColor = Color.Transparent,
+                                        unfocusedContainerColor = Color.Transparent,
+                                        focusedBorderColor = Color.Transparent,
+                                        unfocusedBorderColor = Color.Transparent
                                     )
+                                )
+                                // 场景 1：拍照 + 「+」内联尾随；场景 2/3 时下沉到第二层。
+                                if (!twoLayer) {
+                                    cameraButton()
+                                    plusButton()
                                 }
-                            } else {
-                                cameraButton()
-                                plusButton()
+                            }
+                            // 第二层：功能键行（仅场景 2/3，与第一层同左侧间距）。
+                            if (twoLayer) {
+                                Row(
+                                    modifier = Modifier.padding(
+                                        start = 4.dp,
+                                        end = 8.dp,
+                                        top = 2.dp,
+                                        bottom = 4.dp
+                                    ),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    voiceButton()
+                                    cameraButton()
+                                    plusButton()
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    if (isStreaming) {
+                                        IconButton(onClick = { holder.stop() }) {
+                                            Icon(Icons.Default.Stop, contentDescription = "停止")
+                                        }
+                                    } else if (hasContent) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(40.dp)
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primary)
+                                                .clickable { sendCurrent() },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                Icons.Default.ArrowUpward,
+                                                contentDescription = "发送",
+                                                tint = MaterialTheme.colorScheme.onPrimary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -724,11 +752,12 @@ internal fun ChatScreen(
                 }
 
                 // 免责提示（图 2/3/4）：键盘未弹出（输入框未聚焦）时显示在输入框下方。
+                // 字号与颜色刻意弱化（小一号、半透明），避免抢视觉焦点。
                 if (!isInputFocused) {
                     Text(
                         text = "内容由 AI 生成，请注意核实",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                         textAlign = TextAlign.Center,
                         modifier = Modifier
                             .fillMaxWidth()

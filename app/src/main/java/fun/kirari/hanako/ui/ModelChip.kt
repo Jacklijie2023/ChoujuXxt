@@ -182,9 +182,6 @@ internal fun ChatSettingsContent(
 ) {
     val session by holder.session.collectAsState()
     val modelStates by catalog.states.collectAsState()
-    // 仅本地占位状态，不接真实能力。
-    var webSearch by remember { mutableStateOf(false) }
-    var thinking by remember { mutableStateOf(false) }
     // 整改点 3：在「聊天设置」弹层内翻书式切换到「全部模型」页（弹层不关闭，页面状态不变）。
     var showAllModels by remember { mutableStateOf(false) }
 
@@ -206,6 +203,19 @@ internal fun ChatSettingsContent(
                     FlatModelEntry(provider.id, provider.name, model.id, model.displayName)
                 }
             }
+        }
+    }
+
+    // 当前选中的模型排到最前（[1] 位置，[0] 为「默认 文本模型」卡片），其余保持原顺序。
+    val sortedEntries = remember(entries, session.selectedProviderId, session.selectedModel) {
+        val selectedIndex = entries.indexOfFirst {
+            it.providerId == session.selectedProviderId &&
+                it.modelId.equals(session.selectedModel, ignoreCase = true)
+        }
+        if (selectedIndex <= 0) {
+            entries
+        } else {
+            listOf(entries[selectedIndex]) + entries.filterIndexed { index, _ -> index != selectedIndex }
         }
     }
 
@@ -294,7 +304,7 @@ internal fun ChatSettingsContent(
                         )
                     }
                 }
-                items(entries, key = { "${it.providerId}:${it.modelId}" }) { entry ->
+                items(sortedEntries, key = { "${it.providerId}:${it.modelId}" }) { entry ->
                     val isSelected = entry.providerId == session.selectedProviderId &&
                         entry.modelId.equals(session.selectedModel, ignoreCase = true)
                     ModelCard(
@@ -333,16 +343,16 @@ internal fun ChatSettingsContent(
             FeatureToggleRow(
                 icon = Icons.Default.Public,
                 label = "联网搜索",
-                subtitle = "根据需要访问互联网（即将接入）",
-                checked = webSearch,
-                onCheckedChange = { webSearch = it }
+                subtitle = "回答问题时联网获取实时信息",
+                checked = session.webSearch,
+                onCheckedChange = { holder.setWebSearch(it) }
             )
             FeatureToggleRow(
                 icon = Icons.Default.Psychology,
                 label = "思考模式",
-                subtitle = "推理与思考（即将接入）",
-                checked = thinking,
-                onCheckedChange = { thinking = it }
+                subtitle = "回答前进行深度推理，展示思考过程",
+                checked = session.thinking,
+                onCheckedChange = { holder.setThinking(it) }
             )
         }
     }
@@ -530,7 +540,7 @@ private fun ModelCard(
     }
 }
 
-/** 高级功能开关行（仅本地占位状态）。 */
+/** 高级功能开关行（绑定当前会话状态）。 */
 @Composable
 private fun FeatureToggleRow(
     icon: ImageVector,

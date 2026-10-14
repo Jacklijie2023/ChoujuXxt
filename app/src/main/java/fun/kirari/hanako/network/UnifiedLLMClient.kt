@@ -19,10 +19,12 @@ internal class UnifiedLLMClient(
         userPrompt: String,
         imagesBase64: List<String> = emptyList(),
         tools: List<ToolDef>? = null,
+        webSearch: Boolean = false,
+        thinking: Boolean = false,
         firstDeltaTimeoutMillis: Long,
         trustAllHttpsCertificates: Boolean = false
     ): Flow<LlmEvent> {
-        AppDebugLogStore.i(tag, "stream provider=${provider.kind} model=$model imageCount=${imagesBase64.size} hasTools=${tools != null} trustAllHttps=$trustAllHttpsCertificates")
+        AppDebugLogStore.i(tag, "stream provider=${provider.kind} model=$model imageCount=${imagesBase64.size} hasTools=${tools != null} webSearch=$webSearch thinking=$thinking trustAllHttps=$trustAllHttpsCertificates")
         val sseClient = SseStreamClient(clientProvider.client(trustAllHttpsCertificates))
         val adapter = when (provider.kind) {
             ProviderKind.OPENAI_COMPATIBLE -> OpenAiChatAdapter(sseClient, json)
@@ -39,6 +41,8 @@ internal class UnifiedLLMClient(
                 userPrompt = userPrompt,
                 imagesBase64 = imagesBase64,
                 tools = tools,
+                webSearch = webSearch,
+                thinking = thinking,
                 firstDeltaTimeoutMillis = firstDeltaTimeoutMillis
             )
         )
