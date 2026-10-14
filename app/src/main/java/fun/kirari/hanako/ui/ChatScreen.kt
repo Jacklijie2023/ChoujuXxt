@@ -1,6 +1,7 @@
 package `fun`.kirari.hanako.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -11,9 +12,9 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.util.Base64
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -27,8 +28,12 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -86,6 +91,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -122,7 +128,9 @@ import `fun`.kirari.hanako.data.ModelProviderConfig
 import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 完整 AI 聊天页面（对标成熟 AI 助手移动端观感）。
@@ -150,6 +158,7 @@ internal fun ChatScreen(
     providers: List<ModelProviderConfig>,
     catalog: ChatModelCatalog,
     isActive: Boolean = true,
+    onRevealNavBar: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val session by holder.session.collectAsState()
@@ -165,10 +174,23 @@ internal fun ChatScreen(
     val focusManager = LocalFocusManager.current
 
     // ---- 真实接入手机系统能力：拍照 / 相册 / 本地文件 / 语音输入 / 语音播放 ----
-    // 已选内容（拍照、相册、本地文件）预览；图片显示缩略图，其它显示文件名称。
-    var attachment by remember { mutableStateOf<PickedAttachment?>(null) }
+    // 已选内容（拍照、相册、本地文件）列表：图片显示缩略图，其它显示文件图标；支持多张。
+    var attachments by remember { mutableStateOf<List<PickedAttachment>>(emptyList()) }
     // 拍照输出 Uri：先建好 FileProvider Uri 再交给系统相机写入。
     var cameraUri by remember { mutableStateOf<Uri?>(null) }
+    // 全屏相册选择页开关（「+」面板的相册入口 / 照片区上拉 / 附件行「+」都打开同一个页面）。
+    var albumPageOpen by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    // 底部上滑唤出导航栏的触发阈值。
+    val navRevealThresholdPx = with(LocalDensity.current) { 36.dp.toPx() }
+
+    // 把一张图片 Uri 追加到附件列表（按 Uri 去重）。
+    val addImageAttachment: (Uri, String) -> Unit = { uri, name ->
+        val key = uri.toString()
+        if (attachments.none { it.uri.toString() == key }) {
+            attachments = attachments + PickedAttachment(uri = uri, name = name, isImage = true)
+        }
+    }
 
     // 拍照：拉起系统相机（ACTION_IMAGE_CAPTURE），结果写入 FileProvider 暴露的 Uri。
     val takePictureLauncher = rememberLauncherForActivityResult(
@@ -176,26 +198,14 @@ internal fun ChatScreen(
     ) { success ->
         val uri = cameraUri
         if (success && uri != null) {
-            attachment = PickedAttachment(uri = uri, name = "拍摄照片.jpg", isImage = true)
-            Toast.makeText(context, "已拍摄照片", Toast.LENGTH_SHORT).show()
+            addImageAttachment(uri, "拍摄照片.jpg")
+            Toast.makeText(context, "已添加拍摄照片", Toast.LENGTH_SHORT).show()
         } else if (!success) {
             Toast.makeText(context, "已取消拍照", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // 相册：拉起系统照片选择器（无需申请存储权限，读取由系统授权临时可读）。
-    val galleryLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
-            attachment = PickedAttachment(
-                uri = uri,
-                name = queryDisplayName(context, uri),
-                isImage = true
-            )
-            Toast.makeText(context, "已选择照片", Toast.LENGTH_SHORT).show()
-        }
-    }
+    // 相册：改由应用内全屏相册选择页承担（见 AlbumPickerOverlay），不再拉起系统选择器。
 
     // 本地文件：拉起系统文件选择器。
     val fileLauncher = rememberLauncherForActivityResult(
@@ -203,7 +213,7 @@ internal fun ChatScreen(
     ) { uri ->
         if (uri != null) {
             val name = queryDisplayName(context, uri)
-            attachment = PickedAttachment(uri = uri, name = name, isImage = false)
+            attachments = attachments + PickedAttachment(uri = uri, name = name, isImage = false)
             Toast.makeText(context, "已选择文件：$name", Toast.LENGTH_SHORT).show()
         }
     }
@@ -227,6 +237,28 @@ internal fun ChatScreen(
             voiceMode = true
         } else {
             Toast.makeText(context, "缺少录音权限，无法语音输入", Toast.LENGTH_SHORT).show()
+        }
+    }
+    // 语音识别可用性：优先用系统 SpeechRecognizer 做内联「按住说话」（可实时出字）；
+    // 若本机没有系统语音识别服务（部分国产 ROM），回退到系统语音识别界面（ACTION_RECOGNIZE_SPEECH）。
+    val recognizerAvailable = remember { SpeechRecognizer.isRecognitionAvailable(context) }
+    val speechIntentAvailable = remember {
+        context.packageManager.resolveActivity(
+            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH),
+            PackageManager.MATCH_DEFAULT_ONLY
+        ) != null
+    }
+    // 回退路径：拉起系统语音识别界面，取回识别文本。
+    val speechIntentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val text = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!text.isNullOrBlank()) {
+                input = if (input.isBlank()) text else "$input $text"
+            }
         }
     }
     val voiceSession = remember {
@@ -389,66 +421,6 @@ internal fun ChatScreen(
                 }
             }
 
-            // 已选内容预览（拍照 / 相册 / 本地文件 的真实结果）：图片显示缩略图，其它显示文件名。
-            attachment?.let { picked ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    if (picked.isImage) {
-                        AsyncImage(
-                            model = picked.uri,
-                            contentDescription = picked.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                Icons.Default.Folder,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = picked.name,
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = "图片 / 文件发送能力即将接入",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(
-                        onClick = { attachment = null },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = "移除已选内容",
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-            }
-
             // 大圆角输入容器（图 1/2/3/4）：语音键 / 输入框 / 拍照 / 「+」（点击旋转 90° 变 ×）/ 发送。
             Column(
                 modifier = Modifier
@@ -460,7 +432,24 @@ internal fun ChatScreen(
                     targetValue = if (panelExpanded) 45f else 0f,
                     label = "plusRotation"
                 )
-                val hasContent = input.isNotBlank()
+                val hasContent = input.isNotBlank() || attachments.isNotEmpty()
+
+                // 发送：把输入文字与已选图片（base64，支持多张）一起发出。
+                val sendCurrent: () -> Unit = {
+                    if (!isStreaming && hasContent) {
+                        val text = input
+                        val images = attachments
+                        input = ""
+                        attachments = emptyList()
+                        scope.launch {
+                            val encoded = withContext(Dispatchers.IO) {
+                                images.filter { it.isImage }
+                                    .mapNotNull { encodeImageBase64(context, it.uri) }
+                            }
+                            holder.send(text, encoded)
+                        }
+                    }
+                }
 
                 // 「+」功能键：点击旋转 90°（+ → ×）并展开输入功能面板；面板与键盘互斥。
                 val plusButton: @Composable () -> Unit = {
@@ -507,6 +496,17 @@ internal fun ChatScreen(
                     shape = RoundedCornerShape(28.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerHigh
                 ) {
+                    Column {
+                    // 图 4：已选照片展示在输入框顶部区域（多张横向滚动，右上角可移除）。
+                    if (attachments.isNotEmpty()) {
+                        AttachmentStrip(
+                            attachments = attachments,
+                            onRemove = { uri ->
+                                attachments = attachments.filterNot { it.uri == uri }
+                            },
+                            onAddMore = { albumPageOpen = true }
+                        )
+                    }
                     if (voiceMode) {
                         // 图 3：键盘切换键 + 「按住 说话」 + 拍照 + 「+」。
                         Row(
@@ -527,14 +527,47 @@ internal fun ChatScreen(
                             ) {
                                 Icon(Icons.Default.Keyboard, contentDescription = "切换到键盘输入")
                             }
-                            HoldToTalkBar(
-                                listening = isListening,
-                                partialText = speechPartial,
-                                onStart = { startListening() },
-                                onStop = { stopListening(true) },
-                                onCancel = { stopListening(false) },
-                                modifier = Modifier.weight(1f)
-                            )
+                            if (recognizerAvailable) {
+                                HoldToTalkBar(
+                                    listening = isListening,
+                                    partialText = speechPartial,
+                                    onStart = { startListening() },
+                                    onStop = { stopListening(true) },
+                                    onCancel = { stopListening(false) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            } else {
+                                // 无系统 SpeechRecognizer：回退到系统语音识别界面。
+                                TapToTalkBar(
+                                    onClick = {
+                                        runCatching {
+                                            speechIntentLauncher.launch(
+                                                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                                    putExtra(
+                                                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                                                    )
+                                                    putExtra(
+                                                        RecognizerIntent.EXTRA_LANGUAGE,
+                                                        Locale.getDefault().toLanguageTag()
+                                                    )
+                                                    putExtra(
+                                                        RecognizerIntent.EXTRA_PROMPT,
+                                                        "请说出要输入的内容"
+                                                    )
+                                                }
+                                            )
+                                        }.onFailure {
+                                            Toast.makeText(
+                                                context,
+                                                "未找到可用的语音识别界面",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
                             cameraButton()
                             plusButton()
                         }
@@ -555,16 +588,28 @@ internal fun ChatScreen(
                             IconButton(
                                 onClick = {
                                     focusManager.clearFocus()
-                                    if (hasRecordPermission) {
-                                        voiceMode = true
-                                    } else {
-                                        recordPermissionLauncher.launch(
-                                            Manifest.permission.RECORD_AUDIO
-                                        )
+                                    when {
+                                        // 有系统识别服务：内联「按住说话」（需录音权限）。
+                                        recognizerAvailable -> {
+                                            if (hasRecordPermission) {
+                                                voiceMode = true
+                                            } else {
+                                                recordPermissionLauncher.launch(
+                                                    Manifest.permission.RECORD_AUDIO
+                                                )
+                                            }
+                                        }
+                                        // 无系统识别服务：回退到系统语音识别界面。
+                                        speechIntentAvailable -> voiceMode = true
+                                        else -> Toast.makeText(
+                                            context,
+                                            "本机未安装语音识别服务，请在系统设置中开启语音输入",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
                                     }
                                 }
                             ) {
-                                Icon(Icons.Default.GraphicEq, contentDescription = "语音输入")
+                                VoiceInputIcon()
                             }
                             OutlinedTextField(
                                 value = input,
@@ -602,11 +647,7 @@ internal fun ChatScreen(
                                         .size(40.dp)
                                         .clip(CircleShape)
                                         .background(MaterialTheme.colorScheme.primary)
-                                        .clickable {
-                                            val text = input
-                                            input = ""
-                                            holder.send(text)
-                                        },
+                                        .clickable { sendCurrent() },
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
@@ -621,6 +662,7 @@ internal fun ChatScreen(
                                 plusButton()
                             }
                         }
+                    }
                     }
                 }
 
@@ -648,22 +690,14 @@ internal fun ChatScreen(
                                     ).show()
                                 }
                         },
-                        // 相册：真实拉起系统照片选择器。
-                        onGallery = {
-                            runCatching {
-                                galleryLauncher.launch(
-                                    PickVisualMediaRequest(
-                                        ActivityResultContracts.PickVisualMedia.ImageOnly
-                                    )
-                                )
-                            }.onFailure {
-                                Toast.makeText(
-                                    context,
-                                    "未找到可用的相册选择器",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
+                        // 相册：打开应用内全屏相册选择页（同一个页面，详见 AlbumPickerOverlay）。
+                        onOpenAlbumPage = { albumPageOpen = true },
+                        // 面板照片条点击（单选式）：直接加入输入框顶部附件区。
+                        onAddPhoto = { uri ->
+                            addImageAttachment(uri, queryDisplayName(context, uri))
                         },
+                        // 已加入输入框顶部的照片 Uri（用于照片条上的勾选态）。
+                        attachedUris = attachments.map { it.uri.toString() }.toSet(),
                         // 本地文件：真实拉起系统文件选择器。
                         onFile = {
                             runCatching { fileLauncher.launch(arrayOf("*/*")) }
@@ -747,6 +781,56 @@ internal fun ChatScreen(
                 }
             }
         }
+
+        // 全屏相册选择页（图 1/图 2）：Activity 宿主窗口内覆盖渲染（不创建新窗口）。
+        if (albumPageOpen) {
+            AlbumPickerOverlay(
+                hasPermission = hasPhotoPermission,
+                onRequestPermission = { photoPermissionLauncher.launch(photoReadPermission()) },
+                onDismiss = { albumPageOpen = false },
+                onConfirm = { uris ->
+                    uris.forEach { uri -> addImageAttachment(uri, queryDisplayName(context, uri)) }
+                    albumPageOpen = false
+                },
+                onCamera = {
+                    val uri = createCameraImageUri(context)
+                    cameraUri = uri
+                    runCatching { takePictureLauncher.launch(uri) }
+                        .onFailure {
+                            Toast.makeText(context, "未找到可用的相机应用", Toast.LENGTH_SHORT).show()
+                        }
+                },
+                onFile = {
+                    runCatching { fileLauncher.launch(arrayOf("*/*")) }
+                        .onFailure {
+                            Toast.makeText(context, "未找到可用的文件选择器", Toast.LENGTH_SHORT).show()
+                        }
+                }
+            )
+        }
+
+        // 底部上滑薄条：聊天页隐藏底部导航栏后，在此向上滑动即可唤回导航栏。
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(24.dp)
+                .pointerInput(Unit) {
+                    var accum = 0f
+                    detectVerticalDragGestures(
+                        onDragStart = { accum = 0f },
+                        onDragCancel = { accum = 0f },
+                        onDragEnd = { accum = 0f },
+                        onVerticalDrag = { _, dragAmount ->
+                            accum += dragAmount
+                            if (accum <= -navRevealThresholdPx) {
+                                accum = 0f
+                                onRevealNavBar()
+                            }
+                        }
+                    )
+                }
+        )
     }
 }
 
@@ -1615,6 +1699,134 @@ private fun stripMarkdownForSpeech(text: String): String =
     text.replace(Regex("[#*`>_~\\[\\]()]"), " ")
         .replace(Regex("\\s+"), " ")
         .trim()
+
+/** 把图片 Uri 编码为 base64（用于多模态发送，支持多张）。 */
+private fun encodeImageBase64(context: Context, uri: Uri): String? = runCatching {
+    context.contentResolver.openInputStream(uri)?.use { stream ->
+        Base64.encodeToString(stream.readBytes(), Base64.NO_WRAP)
+    }
+}.getOrNull()
+
+/** 千问式语音输入图标：圆形描边 + 内部声波。 */
+@Composable
+private fun VoiceInputIcon(modifier: Modifier = Modifier) {
+    val tint = MaterialTheme.colorScheme.onSurface
+    Box(
+        modifier = modifier
+            .size(26.dp)
+            .border(2.dp, tint, CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Default.GraphicEq,
+            contentDescription = "语音输入",
+            tint = tint,
+            modifier = Modifier.size(15.dp)
+        )
+    }
+}
+
+/** 点击说话条：本机无系统 SpeechRecognizer 时，点击拉起系统语音识别界面。 */
+@Composable
+private fun TapToTalkBar(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .height(42.dp)
+            .clip(RoundedCornerShape(21.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = "点击 说话",
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+/**
+ * 输入框顶部附件区（图 4）：已选内容横向滚动展示，每张右上角可移除；末尾「+」继续添加。
+ * 仅展示已选图片 / 文件缩略图，不包含「帮我分析图片内容 / 根据图片创作文案」等建议按钮。
+ */
+@Composable
+private fun AttachmentStrip(
+    attachments: List<PickedAttachment>,
+    onRemove: (Uri) -> Unit,
+    onAddMore: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        attachments.forEach { item ->
+            Box(modifier = Modifier.size(64.dp)) {
+                if (item.isImage) {
+                    AsyncImage(
+                        model = item.uri,
+                        contentDescription = item.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(10.dp))
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Folder,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                // 右上角移除按钮。
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(2.dp)
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .clickable { onRemove(item.uri) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "移除该图片",
+                        tint = Color.White,
+                        modifier = Modifier.size(13.dp)
+                    )
+                }
+            }
+        }
+        // 末尾「+」：继续打开全屏相册页添加更多。
+        Box(
+            modifier = Modifier
+                .size(64.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                .clickable(onClick = onAddMore),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Default.Add,
+                contentDescription = "添加图片",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
 
 /**
  * 「按住 说话」条（图 3）：按下开始识别、松开提交、手势取消则丢弃。

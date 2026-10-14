@@ -48,13 +48,13 @@ class ChatSessionHolderTest {
 
     private fun holder(scope: CoroutineScope, vararg streams: Flow<LlmEvent>): ChatSessionHolder {
         val queue = ArrayDeque(streams.toList())
-        val source = ChatStreamSource { _, _, _, _, _, _ -> queue.removeFirst() }
+        val source = ChatStreamSource { _, _, _, _, _, _, _ -> queue.removeFirst() }
         return ChatSessionHolder(streamSource = source, configProvider = { config }, scope = scope)
     }
 
     private fun holderWithoutProvider(scope: CoroutineScope): ChatSessionHolder =
         ChatSessionHolder(
-            streamSource = ChatStreamSource { _, _, _, _, _, _ -> flowOf() },
+            streamSource = ChatStreamSource { _, _, _, _, _, _, _ -> flowOf() },
             configProvider = { config.copy(provider = null) },
             scope = scope
         )
@@ -333,7 +333,7 @@ class ChatSessionHolderTest {
         var capturedProvider: ModelProviderConfig? = null
         var capturedModel: String? = null
         val holder = ChatSessionHolder(
-            streamSource = ChatStreamSource { p, m, _, _, _, _ ->
+            streamSource = ChatStreamSource { p, m, _, _, _, _, _ ->
                 capturedProvider = p
                 capturedModel = m
                 flowOf(LlmEvent.Done)
@@ -357,7 +357,7 @@ class ChatSessionHolderTest {
         var capturedProvider: ModelProviderConfig? = null
         var capturedModel: String? = null
         val holder = ChatSessionHolder(
-            streamSource = ChatStreamSource { p, m, _, _, _, _ ->
+            streamSource = ChatStreamSource { p, m, _, _, _, _, _ ->
                 capturedProvider = p
                 capturedModel = m
                 flowOf(LlmEvent.Done)
@@ -393,7 +393,7 @@ class ChatSessionHolderTest {
         vararg streams: Flow<LlmEvent>
     ): ChatSessionHolder {
         val queue = ArrayDeque(streams.toList())
-        val source = ChatStreamSource { _, _, _, _, _, _ -> queue.removeFirst() }
+        val source = ChatStreamSource { _, _, _, _, _, _, _ -> queue.removeFirst() }
         return ChatSessionHolder(
             streamSource = source,
             configProvider = { config },

@@ -170,6 +170,10 @@ fun HanakoApp(viewModel: MainViewModel) {
     var showLiteDownloadDialog by remember { mutableStateOf(false) }
 
     var currentScreen by rememberSaveable { mutableStateOf(Screen.Hanako) }
+    // 聊天页默认隐藏底部导航栏（更宽敞），用户可在屏幕底部向上滑动把它唤回来。
+    var navBarRevealed by remember { mutableStateOf(false) }
+    // 任何页面切换都重置为「隐藏」：点击底部导航进入聊天页时自动收起导航栏。
+    LaunchedEffect(currentScreen) { navBarRevealed = false }
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
@@ -267,7 +271,10 @@ fun HanakoApp(viewModel: MainViewModel) {
             },
             bottomBar = {
                 AnimatedVisibility(
-                    visible = currentRoute == ROUTE_HOME_SHELL && !imeVisible,
+                    // 聊天页默认隐藏底部导航栏，让聊天区更宽敞；在底部上滑或切到其它页时重新显示。
+                    visible = currentRoute == ROUTE_HOME_SHELL &&
+                        !imeVisible &&
+                        (currentScreen != Screen.Chat || navBarRevealed),
                     enter = slideInVertically { it } + fadeIn(),
                     exit = shrinkVertically() + fadeOut()
                 ) {
@@ -354,7 +361,8 @@ fun HanakoApp(viewModel: MainViewModel) {
                                 holder = viewModel.chatSessionHolder,
                                 providers = chatProviders.providers,
                                 catalog = viewModel.chatModelCatalog,
-                                isActive = isActive
+                                isActive = isActive,
+                                onRevealNavBar = { navBarRevealed = true }
                             )
                         },
                         settingsContent = {

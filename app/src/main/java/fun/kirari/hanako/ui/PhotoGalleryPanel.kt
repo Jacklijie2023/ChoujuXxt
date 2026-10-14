@@ -8,22 +8,27 @@ import android.util.Size
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -34,17 +39,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -236,19 +241,22 @@ private fun GalleryActionTile(
  * - 图片仅浏览与选择，不发送给 AI（多模态能力未接入）。
  *
  * @param onCamera 宿主提供的「拍照」回调，负责真实拉起系统相机。
- * @param onGallery 宿主提供的「相册」回调，负责真实拉起系统相册选择器。
  * @param onFile 宿主提供的「本地文件」回调，负责真实拉起系统文件选择器。
+ * @param onOpenAlbumPage 「相册」按钮 / 照片区上拉：打开宿主的全屏相册页（同一个页面）。
+ * @param onAddPhoto 「+」面板照片条：点一下即把该照片加入输入框顶部附件区（单选式）。
+ * @param attachedUris 已加入输入框顶部附件区的照片 Uri（用于在照片条上显示勾选）。
  * @param overlaySafe 迷你窗（overlay Service 宿主，无 Activity token）时为 true：
- *   相册分类改用窗口内内联列表（ModalBottomSheet / DropdownMenu 都会创建新窗口触发 BadTokenException）。
+ *   相册分类改用窗口内内联列表（创建新窗口会触发 BadTokenException）。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ChatInputActionPanel(
     hasPermission: Boolean,
     onRequestPermission: () -> Unit,
     onCamera: () -> Unit,
-    onGallery: () -> Unit,
     onFile: () -> Unit,
+    onOpenAlbumPage: () -> Unit,
+    onAddPhoto: (Uri) -> Unit,
+    attachedUris: Set<String>,
     modifier: Modifier = Modifier,
     overlaySafe: Boolean = false
 ) {
@@ -258,10 +266,8 @@ internal fun ChatInputActionPanel(
     var selectedAlbum by remember { mutableStateOf<String?>(null) }
     var selectedUris by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showAlbumMenu by remember { mutableStateOf(false) }
-    // 主界面（图 5）：向上拖动照片区拉出「抽屉式」全相册。
-    var drawerOpen by remember { mutableStateOf(false) }
 
-    // 照片多选：点击切换选中态（照片条与抽屉共用同一选中集合）。
+    // 迷你窗内的相册多选：点击切换选中态。
     val togglePhoto: (String) -> Unit = { key ->
         selectedUris = if (key in selectedUris) selectedUris - key else selectedUris + key
     }
@@ -303,7 +309,7 @@ internal fun ChatInputActionPanel(
             GalleryActionTile(
                 icon = Icons.Default.PhotoLibrary,
                 label = "相册",
-                onClick = { onGallery() },
+                onClick = { onOpenAlbumPage() },
                 modifier = Modifier.weight(1f)
             )
             GalleryActionTile(
@@ -408,41 +414,23 @@ internal fun ChatInputActionPanel(
                     onToggle = togglePhoto
                 )
             }
+
+            if (selectedUris.isNotEmpty()) {
+                PhotoSelectionHint(selectedUris.size)
+            }
         } else {
-            // 主界面（图 5 层级 0）：照片上方不展示相册分类标题，仅展示两行照片；
-            // 向上拖动照片区拉出「抽屉式」全相册。
+            // 主界面「+」面板层级 0（图 3/5）：照片上方不展示相册分类标题，仅展示两行照片；
+            // 点一下照片即把它加入输入框顶部附件区（单选式）；向上拖动照片区打开全屏相册页。
             if (photos.isEmpty()) {
                 EmptyPhotos()
             } else {
                 DragUpPhotoStrip(
                     photos = photos.take(8),
-                    selectedUris = selectedUris,
-                    onToggle = togglePhoto,
-                    onPullUp = { drawerOpen = true }
+                    attachedUris = attachedUris,
+                    onAdd = onAddPhoto,
+                    onPullUp = onOpenAlbumPage
                 )
             }
-        }
-
-        if (selectedUris.isNotEmpty()) {
-            PhotoSelectionHint(selectedUris.size)
-        }
-    }
-
-    // 抽屉式全相册（仅主界面）：顶部居中分类标题（点击切换相册）+ 全量照片网格；
-    // 向下滑动由 ModalBottomSheet 自身收起，回到「+」面板初始状态（图 5）。
-    if (!overlaySafe && drawerOpen) {
-        ModalBottomSheet(
-            onDismissRequest = { drawerOpen = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ) {
-            AlbumDrawerContent(
-                photos = photos,
-                albums = albums,
-                selectedAlbum = selectedAlbum,
-                selectedUris = selectedUris,
-                onSelectAlbum = { selectedAlbum = it },
-                onToggle = togglePhoto
-            )
         }
     }
 }
@@ -545,14 +533,15 @@ private fun PhotoGrid(
 }
 
 /**
- * 主界面「+」面板层级 0 的照片条（图 5）：不展示相册分类标题，仅 2 行照片；
- * 向上拖动（不滚动）达阈值后回调 [onPullUp] 拉出抽屉式全相册。
+ * 主界面「+」面板层级 0 的照片条（图 3/5）：不展示相册分类标题，仅 2 行照片；
+ * 点一下照片 → [onAdd] 把它加入输入框顶部附件区（已加入的显示勾选）；
+ * 向上拖动（不滚动）达阈值后回调 [onPullUp] 打开全屏相册页。
  */
 @Composable
 private fun DragUpPhotoStrip(
     photos: List<PhonePhoto>,
-    selectedUris: Set<String>,
-    onToggle: (String) -> Unit,
+    attachedUris: Set<String>,
+    onAdd: (Uri) -> Unit,
     onPullUp: () -> Unit
 ) {
     val density = LocalDensity.current
@@ -594,8 +583,8 @@ private fun DragUpPhotoStrip(
                 val key = photo.uri.toString()
                 SelectablePhotoCell(
                     photo = photo,
-                    selected = key in selectedUris,
-                    onToggle = { onToggle(key) }
+                    selected = key in attachedUris,
+                    onToggle = { onAdd(photo.uri) }
                 )
             }
         }
@@ -645,108 +634,225 @@ private fun PhotoSelectionHint(count: Int) {
     )
 }
 
-/** 抽屉式全相册内容：顶部居中分类标题（点击展开相册列表切换）+ 全量照片网格。 */
+/**
+ * 全屏相册选择页（图 1 / 图 2）：由「+」面板的「相册」入口或照片区上拉唤起（同一个页面）。
+ *
+ * - 顶部左上角 × 关闭；顶部居中可点击标题切换手机相册分类。
+ * - 功能行：拍照 / 本地文件；下方展示「共 N 项」。
+ * - 4 列网格多选，最多 [maxSelectable] 张；选中照片后底部才出现「确认上传（n/max）」按钮。
+ * - 窗口内覆盖渲染（Activity 宿主），不使用 ModalBottomSheet：需全屏且与顶部状态栏留间距。
+ */
 @Composable
-private fun AlbumDrawerContent(
-    photos: List<PhonePhoto>,
-    albums: List<String>,
-    selectedAlbum: String?,
-    selectedUris: Set<String>,
-    onSelectAlbum: (String?) -> Unit,
-    onToggle: (String) -> Unit
+internal fun AlbumPickerOverlay(
+    hasPermission: Boolean,
+    onRequestPermission: () -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: (List<Uri>) -> Unit,
+    onCamera: () -> Unit,
+    onFile: () -> Unit,
+    maxSelectable: Int = 20
 ) {
-    var pickerOpen by remember { mutableStateOf(false) }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-    ) {
-        // 顶部居中分类标题：点击切换手机相册分类。
-        Box(
-            modifier = Modifier.fillMaxWidth(),
-            contentAlignment = Alignment.Center
-        ) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable { pickerOpen = !pickerOpen }
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    selectedAlbum ?: "全部照片",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Icon(
-                    Icons.Default.ArrowDropDown,
-                    contentDescription = "切换相册"
-                )
-            }
-        }
+    val context = LocalContext.current
+    var photos by remember { mutableStateOf<List<PhonePhoto>>(emptyList()) }
+    var albums by remember { mutableStateOf<List<String>>(emptyList()) }
+    var selectedAlbum by remember { mutableStateOf<String?>(null) }
+    var menuOpen by remember { mutableStateOf(false) }
+    // 已选照片 Uri 列表（保持选择顺序，用于计数与「确认上传」）。
+    var selection by remember { mutableStateOf<List<String>>(emptyList()) }
 
-        AnimatedVisibility(visible = pickerOpen) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp),
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                tonalElevation = 2.dp
-            ) {
-                Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                    AlbumOptionRow(
-                        label = "全部照片",
-                        selected = selectedAlbum == null,
-                        onClick = {
-                            onSelectAlbum(null)
-                            pickerOpen = false
-                        }
-                    )
-                    albums.forEach { album ->
-                        AlbumOptionRow(
-                            label = album,
-                            selected = selectedAlbum == album,
-                            onClick = {
-                                onSelectAlbum(album)
-                                pickerOpen = false
-                            }
+    LaunchedEffect(hasPermission, selectedAlbum) {
+        photos = if (hasPermission) {
+            withContext(Dispatchers.IO) { queryPhotos(context, selectedAlbum) }
+        } else {
+            emptyList()
+        }
+    }
+    LaunchedEffect(hasPermission) {
+        albums = if (hasPermission) {
+            withContext(Dispatchers.IO) { queryAlbums(context) }
+        } else {
+            emptyList()
+        }
+    }
+
+    val toggle: (String) -> Unit = { key ->
+        selection = when {
+            key in selection -> selection - key
+            selection.size >= maxSelectable -> {
+                Toast.makeText(context, "最多只能选择 $maxSelectable 张照片", Toast.LENGTH_SHORT).show()
+                selection
+            }
+            else -> selection + key
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // 遮罩：点击关闭相册页。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.32f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { onDismiss() }
+        )
+        Surface(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .fillMaxHeight()
+                // 与顶部手机导航栏（状态栏）留出间距。
+                .statusBarsPadding()
+                .padding(top = 12.dp),
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // 顶部栏：左上角 × 关闭 + 居中可点击标题（切换相册分类）。
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                ) {
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.align(Alignment.CenterStart)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭相册")
+                    }
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { menuOpen = !menuOpen }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = selectedAlbum ?: "全部照片",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
                         )
+                        Icon(Icons.Default.ArrowDropDown, contentDescription = "切换相册")
+                    }
+                }
+
+                AnimatedVisibility(visible = menuOpen) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        tonalElevation = 2.dp
+                    ) {
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            AlbumOptionRow(
+                                label = "全部照片",
+                                selected = selectedAlbum == null,
+                                onClick = {
+                                    selectedAlbum = null
+                                    menuOpen = false
+                                }
+                            )
+                            albums.forEach { album ->
+                                AlbumOptionRow(
+                                    label = album,
+                                    selected = selectedAlbum == album,
+                                    onClick = {
+                                        selectedAlbum = album
+                                        menuOpen = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 功能行：拍照 / 本地文件（等宽并排、间距一致）。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    GalleryActionTile(
+                        icon = Icons.Default.CameraAlt,
+                        label = "拍照",
+                        onClick = onCamera,
+                        modifier = Modifier.weight(1f)
+                    )
+                    GalleryActionTile(
+                        icon = Icons.Default.Folder,
+                        label = "本地文件",
+                        onClick = onFile,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Text(
+                    text = "共 ${photos.size} 项",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                )
+
+                if (!hasPermission) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("需要相册读取权限", style = MaterialTheme.typography.bodyMedium)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(onClick = onRequestPermission) { Text("允许访问") }
+                        }
+                    }
+                } else if (photos.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    ) {
+                        EmptyPhotos()
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(4),
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(photos, key = { it.uri.toString() }) { photo ->
+                            val key = photo.uri.toString()
+                            SelectablePhotoCell(
+                                photo = photo,
+                                selected = key in selection,
+                                onToggle = { toggle(key) }
+                            )
+                        }
+                    }
+                }
+
+                // 仅当选中照片后才出现「确认上传（n/max）」按钮。
+                if (selection.isNotEmpty()) {
+                    Button(
+                        onClick = { onConfirm(selection.map { Uri.parse(it) }) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Text("确认上传（${selection.size}/$maxSelectable）")
                     }
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        if (photos.isEmpty()) {
-            EmptyPhotos()
-        } else {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(4),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 460.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items(photos, key = { it.uri.toString() }) { photo ->
-                    val key = photo.uri.toString()
-                    SelectablePhotoCell(
-                        photo = photo,
-                        selected = key in selectedUris,
-                        onToggle = { onToggle(key) }
-                    )
-                }
-            }
-        }
-
-        if (selectedUris.isNotEmpty()) {
-            PhotoSelectionHint(selectedUris.size)
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
     }
 }
 

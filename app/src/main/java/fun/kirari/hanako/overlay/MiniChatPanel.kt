@@ -311,9 +311,13 @@ internal fun MiniChatPanel(
                             onCamera = {
                                 Toast.makeText(context, "请在主界面聊天页使用拍照", Toast.LENGTH_SHORT).show()
                             },
-                            onGallery = {
+                            onOpenAlbumPage = {
                                 Toast.makeText(context, "请在主界面聊天页使用相册", Toast.LENGTH_SHORT).show()
                             },
+                            onAddPhoto = {
+                                Toast.makeText(context, "请在主界面聊天页使用相册", Toast.LENGTH_SHORT).show()
+                            },
+                            attachedUris = emptySet(),
                             onFile = {
                                 Toast.makeText(context, "请在主界面聊天页选择本地文件", Toast.LENGTH_SHORT).show()
                             },

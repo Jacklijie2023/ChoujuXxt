@@ -43,6 +43,7 @@ internal fun interface ChatStreamSource {
         model: String,
         systemPrompt: String,
         userPrompt: String,
+        imagesBase64: List<String>,
         firstDeltaTimeoutMillis: Long,
         trustAllHttpsCertificates: Boolean
     ): Flow<LlmEvent>
@@ -57,6 +58,7 @@ internal class UnifiedChatStreamSource(
         model: String,
         systemPrompt: String,
         userPrompt: String,
+        imagesBase64: List<String>,
         firstDeltaTimeoutMillis: Long,
         trustAllHttpsCertificates: Boolean
     ): Flow<LlmEvent> = client.stream(
@@ -64,7 +66,7 @@ internal class UnifiedChatStreamSource(
         model = model,
         systemPrompt = systemPrompt,
         userPrompt = userPrompt,
-        imagesBase64 = emptyList(),
+        imagesBase64 = imagesBase64,
         tools = null,
         firstDeltaTimeoutMillis = firstDeltaTimeoutMillis,
         trustAllHttpsCertificates = trustAllHttpsCertificates
@@ -116,29 +118,32 @@ internal class ChatSessionHolder(
         }
     }
 
-    /** 发送一条用户消息并开始流式回复。 */
-    fun send(text: String) {
+    /** 发送一条用户消息（可附带图片 base64）并开始流式回复。 */
+    fun send(text: String, imagesBase64: List<String> = emptyList()) {
         val prompt = text.trim()
-        if (prompt.isEmpty() || isBusy()) return
+        // 允许「仅发送图片、不带文字」。
+        if ((prompt.isEmpty() && imagesBase64.isEmpty()) || isBusy()) return
         val sessionId = _state.value.currentSession().id
+        // 无文字时用占位文案展示在用户气泡，避免出现空气泡（不参与模型上下文，模型只收到 prompt）。
+        val display = prompt.ifBlank { "［图片］" }
         updateState { container ->
             container.updateSession(sessionId) { session ->
                 // 会话尚无有效标题时，以第一条用户消息为标题
                 session.copy(
                     title = if (session.title.isBlank() || session.title == ChatSession.DEFAULT_TITLE) {
-                        prompt.take(18)
+                        display.take(18)
                     } else {
                         session.title
                     },
                     messages = session.messages + ChatMessage(
                         role = ChatRole.User,
-                        content = prompt,
+                        content = display,
                         status = ChatMessageStatus.Done
                     )
                 )
             }
         }
-        startStream(sessionId, prompt)
+        startStream(sessionId, prompt, imagesBase64)
     }
 
     /** 重新请求上一条用户消息（用于错误态重试），不会重复追加用户气泡。 */
@@ -309,7 +314,11 @@ internal class ChatSessionHolder(
     /** 供单元测试等待流式任务真正收尾（避免 activeJob 未置空导致的时序竞态）。 */
     internal fun isIdleForTest(): Boolean = !isBusy()
 
-    private fun startStream(sessionId: String, prompt: String) {
+    private fun startStream(
+        sessionId: String,
+        prompt: String,
+        imagesBase64: List<String> = emptyList()
+    ) {
         val config = configProvider()
         val session = _state.value.sessions.firstOrNull { it.id == sessionId } ?: return
         val provider = session.selectedProviderId
@@ -355,6 +364,7 @@ internal class ChatSessionHolder(
                     model = model,
                     systemPrompt = config.systemPrompt,
                     userPrompt = prompt,
+                    imagesBase64 = imagesBase64,
                     firstDeltaTimeoutMillis = firstDeltaTimeoutMillis,
                     trustAllHttpsCertificates = config.trustAllHttpsCertificates
                 ).collect { event ->
