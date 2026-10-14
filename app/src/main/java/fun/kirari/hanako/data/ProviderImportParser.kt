@@ -63,6 +63,7 @@ private fun parseAiProvider(raw: String): ImportedProviderConfig? {
 private fun providerKindFromImportedType(type: String, useResponseApi: Boolean): ProviderKind {
     return when (type.lowercase()) {
         "anthropic" -> ProviderKind.ANTHROPIC
+        "anthropic_messages", "anthropic-messages", "claude_messages" -> ProviderKind.ANTHROPIC_MESSAGES
         "google", "gemini" -> ProviderKind.GOOGLE
         "openai" -> if (useResponseApi) ProviderKind.OPENAI_RESPONSES else ProviderKind.OPENAI_COMPATIBLE
         else -> if (useResponseApi) ProviderKind.OPENAI_RESPONSES else ProviderKind.OPENAI_COMPATIBLE

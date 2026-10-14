@@ -24,5 +24,6 @@ internal interface ProviderAdapter {
 
 internal class PendingToolCall(
     var name: String? = null,
-    val arguments: StringBuilder = StringBuilder()
+    val arguments: StringBuilder = StringBuilder(),
+    var id: String? = null
 )

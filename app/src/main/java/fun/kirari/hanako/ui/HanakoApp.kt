@@ -29,11 +29,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.History
@@ -48,6 +51,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -67,6 +71,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -86,8 +91,10 @@ import `fun`.kirari.hanako.data.LOCAL_OCR_MODEL_ID
 import `fun`.kirari.hanako.data.LOCAL_OCR_PROVIDER_ID
 import `fun`.kirari.hanako.data.ModelPurpose
 import `fun`.kirari.hanako.data.ModelSelection
+import `fun`.kirari.hanako.data.ProviderPreset
 import `fun`.kirari.hanako.data.ProcessingRoute
 import `fun`.kirari.hanako.data.displayName
+import `fun`.kirari.hanako.data.resolveModelName
 import `fun`.kirari.hanako.debug.AppDebugLogStore
 import `fun`.kirari.hanako.formatDebugTime
 import `fun`.kirari.hanako.overlay.OverlayLaunchMode
@@ -100,6 +107,7 @@ import `fun`.kirari.hanako.util.FirstLaunchGuide
 
 enum class Screen(val title: String, val icon: ImageVector) {
     Hanako("Hanako", Icons.Default.Home),
+    Chat("聊天", Icons.Default.Chat),
     Settings("设置", Icons.Default.Settings)
 }
 
@@ -152,6 +160,8 @@ fun HanakoApp(viewModel: MainViewModel) {
     var providerModelsPreviewId by remember { mutableStateOf<String?>(null) }
     var modelPickerTarget by remember { mutableStateOf<ModelPurpose?>(null) }
     var customModelTarget by remember { mutableStateOf<ModelPurpose?>(null) }
+    // 自定义模型保存的目标提供方。即使没有 ModelPurpose（“查看可用模型”入口），也必须有明确的提供方上下文。
+    var customModelProviderId by remember { mutableStateOf<String?>(null) }
     var customModelDialogTitle by remember { mutableStateOf<String?>(null) }
     var providerPickerTarget by remember { mutableStateOf<ModelPurpose?>(null) }
     var modelPickerProviderId by remember { mutableStateOf<String?>(null) }
@@ -162,6 +172,20 @@ fun HanakoApp(viewModel: MainViewModel) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+
+    // 悬浮球迷你窗「打开」跳转请求（含 Activity 已在前台时的 onNewIntent 场景）。
+    val openChatRequests by viewModel.openChatRequests.collectAsState()
+    // 记录已消费的请求序号（可跨配置变更保存），避免旋转屏幕时重复跳转。
+    var handledOpenChatRequests by rememberSaveable { mutableStateOf(0) }
+    LaunchedEffect(openChatRequests) {
+        if (openChatRequests > handledOpenChatRequests) {
+            handledOpenChatRequests = openChatRequests
+            if (navController.currentDestination?.route != ROUTE_HOME_SHELL) {
+                navController.popBackStack(ROUTE_HOME_SHELL, inclusive = false)
+            }
+            currentScreen = Screen.Chat
+        }
+    }
 
     // 首次启动引导
     var showGuide by remember { mutableStateOf(FirstLaunchGuide.isFirstLaunch(context)) }
@@ -183,6 +207,12 @@ fun HanakoApp(viewModel: MainViewModel) {
         currentScreen = Screen.Hanako
     }
 
+    // 键盘（IME）可见时隐藏底部导航栏：聊天页输入区仅用一次 imePadding 即可贴到键盘顶部，
+    // 避免底部导航栏残留在「输入框 ↔ 键盘」之间形成空隙（主流聊天 App 键盘弹出即收起 Tab 栏）。
+    // 间距随各机型/输入法上报的 ime inset 自动变化，天然响应式。
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -197,28 +227,40 @@ fun HanakoApp(viewModel: MainViewModel) {
     ) {
         Scaffold(
             topBar = {
-                CenterAlignedTopAppBar(
-                    title = {
-                        Text(
-                            appTitle(currentRoute, currentScreen),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    },
-                    navigationIcon = {
-                        if (currentRoute != null && currentRoute != ROUTE_HOME_SHELL) {
-                            IconButton(onClick = { navController.popBackStack() }) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                // 聊天页自带轻量顶栏并处理状态栏 inset，此处不再渲染全局 TopAppBar，
+                // 避免「顶死」标题栏叠加导致聊天区有效面积过小。
+                val showGlobalTopBar = !(currentRoute == ROUTE_HOME_SHELL && currentScreen == Screen.Chat)
+                if (showGlobalTopBar) {
+                    CenterAlignedTopAppBar(
+                        title = {
+                            Text(
+                                appTitle(currentRoute, currentScreen),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        },
+                        navigationIcon = {
+                            if (currentRoute != null && currentRoute != ROUTE_HOME_SHELL) {
+                                IconButton(onClick = { navController.popBackStack() }) {
+                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                                }
                             }
-                        }
-                    },
-                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                        containerColor = Color.Transparent
+                        },
+                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                            containerColor = Color.Transparent
+                        )
                     )
-                )
+                }
+            },
+            contentWindowInsets = if (currentRoute == ROUTE_HOME_SHELL && currentScreen == Screen.Chat) {
+                // 聊天页自带 statusBarsPadding（见 ChatScreen），此处清零 Scaffold 顶部 inset，
+                // 避免「Scaffold systemBars inset + ChatScreen statusBarsPadding」双重叠加导致顶部间距过大。
+                WindowInsets(0, 0, 0, 0)
+            } else {
+                ScaffoldDefaults.contentWindowInsets
             },
             bottomBar = {
                 AnimatedVisibility(
-                    visible = currentRoute == ROUTE_HOME_SHELL,
+                    visible = currentRoute == ROUTE_HOME_SHELL && !imeVisible,
                     enter = slideInVertically { it } + fadeIn(),
                     exit = shrinkVertically() + fadeOut()
                 ) {
@@ -297,6 +339,15 @@ fun HanakoApp(viewModel: MainViewModel) {
                                 },
                                 onSelectRoute = viewModel::setRoute,
                                 onOpenHistory = { navController.navigate(ROUTE_HANAKO_HISTORY) }
+                            )
+                        },
+                        chatContent = { isActive ->
+                            val chatProviders by viewModel.settings.collectAsState()
+                            ChatScreen(
+                                holder = viewModel.chatSessionHolder,
+                                providers = chatProviders.providers,
+                                catalog = viewModel.chatModelCatalog,
+                                isActive = isActive
                             )
                         },
                         settingsContent = {
@@ -417,6 +468,7 @@ fun HanakoApp(viewModel: MainViewModel) {
             localOcrInstalled = settings.localOcr.installed,
             title = "选择${providerPickerTarget?.displayName}提供方",
             onDismiss = { providerPickerTarget = null },
+            onAddDeepSeek = { viewModel.addProvider(ProviderPreset.DEEPSEEK) },
             onPick = { providerId ->
                 if (providerId == LOCAL_OCR_PROVIDER_ID) {
                     providerPickerTarget = null
@@ -466,8 +518,12 @@ fun HanakoApp(viewModel: MainViewModel) {
                 viewModel.toggleFavoriteModel(pickerProvider.id, model)
             },
             onCustomModelRequest = { dialogTitle ->
+                customModelProviderId = pickerProvider.id
                 customModelTarget = pickerTarget
                 customModelDialogTitle = dialogTitle
+                // 关闭模型选择弹窗，避免与自定义模型输入弹窗同时显示。
+                modelPickerTarget = null
+                modelPickerProviderId = null
             },
             trustAllHttpsCertificates = settings.trustAllHttpsCertificates
         )
@@ -476,21 +532,32 @@ fun HanakoApp(viewModel: MainViewModel) {
     customModelDialogTitle?.let { title ->
         CustomModelDialog(
             title = title,
+            // 与悬浮球入口保持一致：带入当前用途已选模型作为初始值；无用途的入口（查看可用模型）留空。
+            initialValue = customModelTarget?.let { settings.resolveModelName(it) }.orEmpty(),
             onDismiss = {
                 customModelDialogTitle = null
                 customModelTarget = null
+                customModelProviderId = null
                 modelPickerProviderId = null
             },
             onConfirm = { model ->
-                val purpose = customModelTarget ?: ModelPurpose.TEXT
-                val providerId = modelPickerProviderId ?: return@CustomModelDialog
-                viewModel.updateModelSelectionWithFavorite(
-                    purpose,
-                    ModelSelection(providerId = providerId, model = model),
-                    favoriteModel = true
-                )
+                val providerId = customModelProviderId
+                val purpose = customModelTarget
+                when {
+                    providerId == null -> {
+                        Toast.makeText(context, "无法保存自定义模型：缺少提供方信息", Toast.LENGTH_SHORT).show()
+                    }
+                    // 无用途（“查看可用模型”入口）：只为该提供方登记模型，供各用途列表可选，不覆盖任何已有用途选择。
+                    purpose == null -> viewModel.addFavoriteModel(providerId, model)
+                    else -> viewModel.updateModelSelectionWithFavorite(
+                        purpose,
+                        ModelSelection(providerId = providerId, model = model),
+                        favoriteModel = true
+                    )
+                }
                 customModelDialogTitle = null
                 customModelTarget = null
+                customModelProviderId = null
                 modelPickerTarget = null
                 modelPickerProviderId = null
             }
@@ -507,7 +574,13 @@ fun HanakoApp(viewModel: MainViewModel) {
             onToggleFavorite = { model, _ ->
                 viewModel.toggleFavoriteModel(previewProvider.id, model)
             },
-            onCustomModelRequest = { },
+            onCustomModelRequest = { dialogTitle ->
+                customModelProviderId = previewProvider.id
+                customModelTarget = null
+                customModelDialogTitle = dialogTitle
+                // 关闭“查看可用模型”弹窗，避免与自定义模型输入弹窗同时显示。
+                providerModelsPreviewId = null
+            },
             trustAllHttpsCertificates = settings.trustAllHttpsCertificates
         )
     }
@@ -657,6 +730,7 @@ private fun MainShellScreen(
     currentScreen: Screen,
     onScreenChange: (Screen) -> Unit,
     hanakoContent: @Composable () -> Unit,
+    chatContent: @Composable (Boolean) -> Unit,
     settingsContent: @Composable () -> Unit
 ) {
     val pagerState = rememberPagerState(
@@ -700,6 +774,7 @@ private fun MainShellScreen(
         ) {
             when (Screen.entries[page]) {
                 Screen.Hanako -> hanakoContent()
+                Screen.Chat -> chatContent(currentScreen == Screen.Chat)
                 Screen.Settings -> settingsContent()
             }
         }
@@ -804,8 +879,12 @@ private fun ProviderSelectDialog(
     localOcrInstalled: Boolean,
     title: String,
     onDismiss: () -> Unit,
+    onAddDeepSeek: () -> Unit,
     onPick: (String) -> Unit
 ) {
+    // DeepSeek 是「预设」而非「实例」，只有添加为提供方后才会出现在此列表。
+    // 若用户尚未添加，则提供一键添加入口，避免「找不到 DeepSeek」的困惑。
+    val hasDeepSeek = providers.any { it.baseUrl.trimEnd('/') == `fun`.kirari.hanako.data.DEEPSEEK_DEFAULT_BASE_URL }
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(24.dp),
@@ -854,6 +933,23 @@ private fun ProviderSelectDialog(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                            }
+                        }
+                    }
+                    if (!hasDeepSeek) {
+                        item("__add_deepseek__") {
+                            OutlinedButton(
+                                onClick = onAddDeepSeek,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Text("添加 DeepSeek")
+                                    Text(
+                                        "一键添加 DeepSeek 提供方，添加后即可在此选择",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }

@@ -33,7 +33,7 @@ class ProviderModelsApi(
     ): List<RemoteModelOption> = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(provider.modelsRequestUrl())
-            .addHeader("Authorization", "Bearer ${provider.apiKey}")
+            .applyAuthHeaders(provider)
             .get()
             .build()
 
@@ -47,8 +47,30 @@ class ProviderModelsApi(
                 ProviderKind.GOOGLE -> parseGoogleModels(body)
                 ProviderKind.OPENAI_COMPATIBLE,
                 ProviderKind.OPENAI_RESPONSES,
-                ProviderKind.ANTHROPIC -> parseOpenAiLikeModels(body)
+                ProviderKind.ANTHROPIC,
+                ProviderKind.ANTHROPIC_MESSAGES -> parseOpenAiLikeModels(body)
             }
+        }
+    }
+
+    /**
+     * 模型列表接口的认证头。与聊天请求保持一致的策略：
+     * Anthropic 系走 `x-api-key`（官方规范），其余保持 `Authorization: Bearer`。
+     */
+    private fun Request.Builder.applyAuthHeaders(provider: ModelProviderConfig): Request.Builder = apply {
+        when (provider.kind) {
+            ProviderKind.ANTHROPIC -> {
+                header("x-api-key", provider.apiKey)
+                header("anthropic-version", ANTHROPIC_VERSION)
+            }
+
+            ProviderKind.ANTHROPIC_MESSAGES -> {
+                header("x-api-key", provider.apiKey)
+                header("Authorization", "Bearer ${provider.apiKey}")
+                header("anthropic-version", ANTHROPIC_VERSION)
+            }
+
+            else -> header("Authorization", "Bearer ${provider.apiKey}")
         }
     }
 
@@ -73,7 +95,7 @@ class ProviderModelsApi(
         try {
             val request = Request.Builder()
                 .url(provider.modelsRequestUrl())
-                .addHeader("Authorization", "Bearer ${provider.apiKey}")
+                .applyAuthHeaders(provider)
                 .get()
                 .build()
 

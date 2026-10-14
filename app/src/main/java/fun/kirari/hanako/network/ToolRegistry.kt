@@ -59,6 +59,7 @@ internal object ToolRegistry {
         ProviderKind.OPENAI_COMPATIBLE -> formatChatCompletions(tools)
         ProviderKind.OPENAI_RESPONSES -> formatResponses(tools)
         ProviderKind.ANTHROPIC -> formatAnthropic(tools)
+        ProviderKind.ANTHROPIC_MESSAGES -> formatAnthropic(tools)
         ProviderKind.GOOGLE -> formatGoogle(tools)
     }
 

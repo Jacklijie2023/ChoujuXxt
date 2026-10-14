@@ -107,6 +107,7 @@ internal fun CropOverlaySheet(
     var cropEnd by remember { mutableStateOf(Offset.Zero) }
     var cropPromptVisible by remember { mutableStateOf(true) }
     val density = LocalDensity.current
+    val context = LocalContext.current
     val selectedAssistant = uiState.settings.assistants.firstOrNull { it.id == uiState.settings.selectedAssistantId }
     val routeText = when (uiState.settings.processingRoute) {
         ProcessingRoute.OCR_THEN_LLM -> "OCR模式"
@@ -407,7 +408,9 @@ internal fun CropOverlaySheet(
             onConfirm = { model ->
                 val purpose = customModelTarget
                 val providerId = purpose?.let { uiState.settings.resolveModelProvider(it)?.id }
-                if (purpose != null && providerId != null) {
+                if (purpose == null || providerId == null) {
+                    Toast.makeText(context, "无法保存自定义模型：缺少提供方或用途信息", Toast.LENGTH_SHORT).show()
+                } else {
                     onUpdateModelSelection(
                         purpose,
                         ModelSelection(providerId = providerId, model = model),

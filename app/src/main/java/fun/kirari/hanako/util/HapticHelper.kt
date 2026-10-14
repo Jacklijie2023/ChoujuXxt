@@ -25,14 +25,23 @@ object HapticHelper {
     }
 
     /**
+     * 触觉反馈只是可选反馈，任何异常都不应影响主业务流程。
+     * 与 OverlayServiceHelpers.vibrateShort() 保持一致，失败时跳过振动。
+     */
+    private inline fun safeVibrate(action: (Vibrator) -> Unit) {
+        val current = vibrator ?: return
+        runCatching { action(current) }
+    }
+
+    /**
      * 轻触反馈 - 按钮点击
      */
     fun lightTap() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator?.vibrate(VibrationEffect.createOneShot(20, VibrationEffect.DEFAULT_AMPLITUDE))
+            safeVibrate { it.vibrate(VibrationEffect.createOneShot(20, VibrationEffect.DEFAULT_AMPLITUDE)) }
         } else {
             @Suppress("DEPRECATION")
-            vibrator?.vibrate(20)
+            safeVibrate { it.vibrate(20) }
         }
     }
 
@@ -41,10 +50,10 @@ object HapticHelper {
      */
     fun mediumTap() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator?.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
+            safeVibrate { it.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE)) }
         } else {
             @Suppress("DEPRECATION")
-            vibrator?.vibrate(40)
+            safeVibrate { it.vibrate(40) }
         }
     }
 
@@ -53,10 +62,10 @@ object HapticHelper {
      */
     fun heavyTap() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator?.vibrate(VibrationEffect.createOneShot(80, 200))
+            safeVibrate { it.vibrate(VibrationEffect.createOneShot(80, 200)) }
         } else {
             @Suppress("DEPRECATION")
-            vibrator?.vibrate(80)
+            safeVibrate { it.vibrate(80) }
         }
     }
 
@@ -67,10 +76,10 @@ object HapticHelper {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val timings = longArrayOf(0, 30, 50, 30)
             val amplitudes = intArrayOf(0, 100, 0, 150)
-            vibrator?.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+            safeVibrate { it.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1)) }
         } else {
             @Suppress("DEPRECATION")
-            vibrator?.vibrate(longArrayOf(0, 30, 50, 30), -1)
+            safeVibrate { it.vibrate(longArrayOf(0, 30, 50, 30), -1) }
         }
     }
 
@@ -80,10 +89,10 @@ object HapticHelper {
     fun errorFeedback() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val timings = longArrayOf(0, 20, 80, 20, 80, 20)
-            vibrator?.vibrate(VibrationEffect.createWaveform(timings, -1))
+            safeVibrate { it.vibrate(VibrationEffect.createWaveform(timings, -1)) }
         } else {
             @Suppress("DEPRECATION")
-            vibrator?.vibrate(longArrayOf(0, 20, 80, 20, 80, 20), -1)
+            safeVibrate { it.vibrate(longArrayOf(0, 20, 80, 20, 80, 20), -1) }
         }
     }
 

@@ -61,6 +61,7 @@ import `fun`.kirari.hanako.data.AutomationSettings
 import `fun`.kirari.hanako.data.ModelProviderConfig
 import `fun`.kirari.hanako.data.ModelPurpose
 import `fun`.kirari.hanako.data.ProcessingRoute
+import `fun`.kirari.hanako.data.ProviderPreset
 import `fun`.kirari.hanako.data.ScreenCaptureMethod
 import `fun`.kirari.hanako.data.description
 import `fun`.kirari.hanako.data.displayName
@@ -333,11 +334,12 @@ fun MoreSettingsScreen(
 @Composable
 fun ProviderSettingsScreen(
     settings: AppSettings,
-    onAddProvider: () -> Unit,
+    onAddProvider: (ProviderPreset) -> Unit,
     onDeleteProvider: (String) -> Unit,
     onOpenProvider: (String) -> Unit
 ) {
     var deleteTargetId by remember { mutableStateOf<String?>(null) }
+    var showAddDialog by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -356,7 +358,7 @@ fun ProviderSettingsScreen(
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary
                 )
-                TextButton(onClick = onAddProvider) {
+                TextButton(onClick = { showAddDialog = true }) {
                     Text("新增")
                 }
             }
@@ -409,6 +411,50 @@ fun ProviderSettingsScreen(
             onConfirm = {
                 onDeleteProvider(deleteTarget.id)
                 deleteTargetId = null
+            }
+        )
+    }
+
+    if (showAddDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text("新增提供方") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ProviderPreset.entries.forEach { preset ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    showAddDialog = false
+                                    onAddProvider(preset)
+                                },
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    preset.displayName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    preset.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAddDialog = false }) {
+                    Text("取消")
+                }
             }
         )
     }

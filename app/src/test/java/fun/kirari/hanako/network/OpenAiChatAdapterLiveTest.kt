@@ -4,10 +4,8 @@ import `fun`.kirari.hanako.data.ModelProviderConfig
 import `fun`.kirari.hanako.data.ProviderKind
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.runBlocking
-import okhttp3.OkHttpClient
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.util.concurrent.TimeUnit
 
 class OpenAiChatAdapterLiveTest {
     @Test
@@ -33,12 +31,7 @@ class OpenAiChatAdapterLiveTest {
             ocrModel = model
         )
 
-        val client = UnifiedLLMClient(
-            OkHttpClient.Builder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(0, TimeUnit.MILLISECONDS)
-                .build()
-        )
+        val client = UnifiedLLMClient()
 
         val events = mutableListOf<LlmEvent>()
 

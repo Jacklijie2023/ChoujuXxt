@@ -38,6 +38,8 @@ import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import `fun`.kirari.hanako.R
 import `fun`.kirari.hanako.capture.MediaProjectionForegroundService
 import `fun`.kirari.hanako.capture.ProjectionPermissionActivity
@@ -97,6 +99,11 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     private var panelHandleWidthPx: Int = 0
     private var panelAnimationJob: Job? = null
     private var panelClosing = false
+
+    // 迷你聊天小窗宿主（独立于全屏底部抽屉）
+    private var miniChatView: FrameLayout? = null
+    private var miniChatComposeView: androidx.compose.ui.platform.ComposeView? = null
+    private var miniChatParams: WindowManager.LayoutParams? = null
 
     // 防截屏检测
     private var secureWindowPollingJob: Job? = null
@@ -162,6 +169,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
 
     override fun onDestroy() {
         dismissPanel()
+        hideMiniChat()
         stopSecureWindowPolling()
         stopShakeDetection()
         TtsHelper.shutdown()
@@ -193,9 +201,12 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                 )
                 updateBubbleAppearance(state.bubbleState, state.launchMode)
                 if (state.sheetVisible) {
+                    // 全屏抽屉优先：抽屉可见时收起迷你聊天，避免两个浮层叠加。
+                    hideMiniChat()
                     showOrUpdatePanel(state.sheetMode)
                 } else {
                     hidePanelWithAnimation()
+                    if (state.miniChatVisible) showMiniChat() else hideMiniChat()
                 }
                 if (state.autoRunState == AutoRunState.COMPLETED) {
                     val completionId = state.result?.id ?: state.autoCopiedLabel
@@ -718,6 +729,109 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         panelParams = null
         panelCurrentHeightPx = 0
         panelClosing = false
+    }
+
+    // ========================
+    // 迷你聊天小窗
+    // ========================
+
+    /**
+     * 展示迷你聊天小窗（圆角卡片形态的独立悬浮窗）。
+     *
+     * 与全屏底部抽屉互斥；窗口可获取输入焦点以弹出软键盘，窗口外点击透传。
+     */
+    private fun showMiniChat() {
+        if (miniChatView != null) return
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        windowManager.defaultDisplay.getRealMetrics(metrics)
+        val density = resources.displayMetrics.density
+        val screenWidthPx = metrics.widthPixels
+        val screenHeightPx = metrics.heightPixels
+        val widthPx = (300f * density).roundToInt()
+            .coerceAtMost((screenWidthPx * 0.9f).roundToInt())
+        val heightPx = (400f * density).roundToInt()
+            .coerceAtMost((screenHeightPx * 0.72f).roundToInt())
+
+        val params = WindowManager.LayoutParams(
+            widthPx,
+            heightPx,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            // 不设置 FLAG_NOT_FOCUSABLE：允许输入框获取焦点并弹出软键盘；
+            // FLAG_NOT_TOUCH_MODAL 让窗口外点击透传给底层应用。
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (screenWidthPx - widthPx - (16f * density).roundToInt()).coerceAtLeast(0)
+            y = (screenHeightPx * 0.18f).roundToInt()
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        }
+
+        val composeView = androidx.compose.ui.platform.ComposeView(this).apply {
+            setViewTreeLifecycleOwner(this@OverlayService)
+            setViewTreeViewModelStoreOwner(this@OverlayService)
+            setViewTreeSavedStateRegistryOwner(this@OverlayService)
+            setContent {
+                val miniProviders by overlayViewModel.providers.collectAsState()
+                `fun`.kirari.hanako.ui.theme.HanakoTheme {
+                    MiniChatPanel(
+                        holder = overlayViewModel.chatSessionHolder,
+                        providers = miniProviders,
+                        catalog = overlayViewModel.chatModelCatalog,
+                        onHeaderDrag = { dx, dy -> moveMiniChatBy(dx, dy) },
+                        onOpenMainApp = { openMainChatAndHideMini() },
+                        onClose = { overlayViewModel.setMiniChatVisible(false) }
+                    )
+                }
+            }
+        }
+        val root = FrameLayout(this).apply {
+            setViewTreeLifecycleOwner(this@OverlayService)
+            setViewTreeViewModelStoreOwner(this@OverlayService)
+            setViewTreeSavedStateRegistryOwner(this@OverlayService)
+            addView(
+                composeView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+
+        miniChatParams = params
+        miniChatView = root
+        miniChatComposeView = composeView
+        runCatching { windowManager.addView(root, params) }.onFailure {
+            AppDebugLogStore.e(logTag, "showMiniChat failed", it)
+            miniChatView = null
+            miniChatComposeView = null
+            miniChatParams = null
+        }
+    }
+
+    private fun hideMiniChat() {
+        val view = miniChatView ?: return
+        runCatching { windowManager.removeView(view) }
+        miniChatView = null
+        miniChatComposeView = null
+        miniChatParams = null
+    }
+
+    /** 迷你窗顶部拖拽：以增量像素位移更新窗口位置。 */
+    private fun moveMiniChatBy(dx: Float, dy: Float) {
+        val view = miniChatView ?: return
+        val params = miniChatParams ?: return
+        params.x += dx.roundToInt()
+        params.y += dy.roundToInt()
+        runCatching { windowManager.updateViewLayout(view, params) }
+    }
+
+    /** 迷你窗「打开」：收起迷你窗并跳转主 App 聊天页。 */
+    private fun openMainChatAndHideMini() {
+        overlayViewModel.setMiniChatVisible(false)
+        openMainActivityForChat(this)
     }
 
     // ========================

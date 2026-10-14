@@ -8,6 +8,13 @@ enum class ProviderKind {
     OPENAI_COMPATIBLE,
     OPENAI_RESPONSES,
     ANTHROPIC,
+
+    /**
+     * Anthropic Messages 兼容协议（POST /v1/messages）。
+     * 与 [ANTHROPIC] 复用同一个 Messages 适配器，但使用独立配置入口，
+     * 以适配支持 Anthropic Messages 协议的中转站（可自定义 Base URL、API Key 与模型名称）。
+     */
+    ANTHROPIC_MESSAGES,
     GOOGLE
 }
 
@@ -55,6 +62,7 @@ val ProviderKind.displayName: String
         ProviderKind.OPENAI_COMPATIBLE -> "OpenAI Compatible"
         ProviderKind.OPENAI_RESPONSES -> "OpenAI Responses"
         ProviderKind.ANTHROPIC -> "Anthropic"
+        ProviderKind.ANTHROPIC_MESSAGES -> "Anthropic Messages"
         ProviderKind.GOOGLE -> "Google Gemini"
     }
 
@@ -63,6 +71,7 @@ val ProviderKind.defaultBaseUrl: String
         ProviderKind.OPENAI_COMPATIBLE -> "https://api.openai.com/v1"
         ProviderKind.OPENAI_RESPONSES -> "https://api.openai.com/v1"
         ProviderKind.ANTHROPIC -> "https://api.anthropic.com/v1"
+        ProviderKind.ANTHROPIC_MESSAGES -> "https://api.anthropic.com/v1"
         ProviderKind.GOOGLE -> "https://generativelanguage.googleapis.com/v1beta"
     }
 
@@ -71,6 +80,7 @@ val ProviderKind.modelsRequestSuffix: String
         ProviderKind.OPENAI_COMPATIBLE -> "/models"
         ProviderKind.OPENAI_RESPONSES -> "/models"
         ProviderKind.ANTHROPIC -> "/models"
+        ProviderKind.ANTHROPIC_MESSAGES -> "/models"
         ProviderKind.GOOGLE -> "/models?pageSize=100"
     }
 
@@ -79,12 +89,64 @@ val ProviderKind.requestPathSuffix: String
         ProviderKind.OPENAI_COMPATIBLE -> "/chat/completions"
         ProviderKind.OPENAI_RESPONSES -> "/responses"
         ProviderKind.ANTHROPIC -> "/messages"
+        ProviderKind.ANTHROPIC_MESSAGES -> "/messages"
         ProviderKind.GOOGLE -> "/models"
     }
 
-fun ModelProviderConfig.requestPreviewUrl(): String = "${baseUrl.trimEnd('/')}${kind.requestPathSuffix}"
+/** 形如 `v1`、`v1beta`、`v2` 的版本路径段。 */
+private val HOST_VERSION_SEGMENT = Regex("^v\\d+(?:(?:alpha|beta)\\d*)?$", RegexOption.IGNORE_CASE)
 
-fun ModelProviderConfig.modelsRequestUrl(): String = "${baseUrl.trimEnd('/')}${kind.modelsRequestSuffix}"
+/** Anthropic Messages 的聊天端点名，同时用于识别「已包含完整端点」的 Base URL。 */
+private const val ANTHROPIC_MESSAGES_CHAT_ENDPOINT = "messages"
+
+/**
+ * 计算 Anthropic Messages 的最终请求 URL（聊天与模型列表共用同一套规则）。
+ *
+ * Base URL 语义：API 根地址。按以下规则补齐路径，避免出现 `/v1/v1/...` 或 `/messages/messages`：
+ * 1. 去掉首尾空白与末尾 `/`；
+ * 2. 若已以 `/messages` 结尾（完整聊天端点），取其前缀作为根，仅替换端点为 [endpoint]；
+ * 3. 否则若最后一个路径段是版本段（如 `v1`、`v1beta`），追加 `/[endpoint]`；
+ * 4. 否则（纯主机名或其它前缀）追加 `/v1/[endpoint]`。
+ *
+ * @param endpoint 端点名（聊天为 `messages`，模型列表为 `models`），保证二者路径前缀始终一致。
+ */
+private fun anthropicMessagesEndpointUrl(rawBaseUrl: String, endpoint: String): String {
+    val base = rawBaseUrl.trim().trimEnd('/')
+    if (base.isEmpty()) return ""
+    val chatSuffix = "/$ANTHROPIC_MESSAGES_CHAT_ENDPOINT"
+    if (base.endsWith(chatSuffix, ignoreCase = true)) {
+        return base.dropLast(chatSuffix.length) + "/$endpoint"
+    }
+    val lastSegment = base.substringAfterLast('/')
+    return if (HOST_VERSION_SEGMENT.matches(lastSegment)) {
+        "$base/$endpoint"
+    } else {
+        "$base/v1/$endpoint"
+    }
+}
+
+/** Anthropic Messages 聊天请求的最终 URL。 */
+internal fun anthropicMessagesRequestUrl(rawBaseUrl: String): String =
+    anthropicMessagesEndpointUrl(rawBaseUrl, ANTHROPIC_MESSAGES_CHAT_ENDPOINT)
+
+/** Anthropic Messages 模型列表请求的最终 URL（与聊天请求遵循同一套路径规则）。 */
+internal fun anthropicMessagesModelsUrl(rawBaseUrl: String): String =
+    anthropicMessagesEndpointUrl(rawBaseUrl, "models")
+
+/** 该提供方实际会请求的完整 URL（供预览与真实请求共用，确保二者一致）。 */
+fun ModelProviderConfig.resolvedRequestUrl(): String = when (kind) {
+    ProviderKind.ANTHROPIC_MESSAGES -> anthropicMessagesRequestUrl(baseUrl)
+    else -> "${baseUrl.trimEnd('/')}${kind.requestPathSuffix}"
+}
+
+fun ModelProviderConfig.requestPreviewUrl(): String = resolvedRequestUrl()
+
+fun ModelProviderConfig.modelsRequestUrl(): String = when (kind) {
+    // Anthropic Messages 的模型列表必须与聊天请求使用同一套路径归一化规则，
+    // 否则根地址（如 https://seekai.cc）会出现聊天 /v1/messages 而模型列表 /models 的错位。
+    ProviderKind.ANTHROPIC_MESSAGES -> anthropicMessagesModelsUrl(baseUrl)
+    else -> "${baseUrl.trimEnd('/')}${kind.modelsRequestSuffix}"
+}
 
 @Serializable
 data class AssistantPreset(
@@ -188,6 +250,39 @@ enum class AutomationActionType {
 }
 
 fun defaultProvider(): ModelProviderConfig = ModelProviderConfig()
+
+/** 新增提供方时的预设入口。 */
+enum class ProviderPreset(val displayName: String, val description: String) {
+    CUSTOM("自定义提供方", "手动填写 Base URL、API Key 与模型名称"),
+    DEEPSEEK("DeepSeek", "复用 OpenAI 兼容协议，默认 https://api.deepseek.com/v1；点击添加后即可在模型选择中使用"),
+    ANTHROPIC_MESSAGES("Anthropic Messages", "Anthropic Messages 兼容协议，适用于中转站")
+}
+
+/** DeepSeek 官方 OpenAI 兼容 Base URL（官方文档：https://api.deepseek.com，/v1 亦可）。 */
+const val DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
+
+/** DeepSeek 官方模型名称（官方文档当前主推模型）。 */
+const val DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
+
+fun ProviderPreset.createProvider(index: Int): ModelProviderConfig = when (this) {
+    ProviderPreset.CUSTOM -> ModelProviderConfig(name = "自定义提供方 $index")
+    ProviderPreset.DEEPSEEK -> ModelProviderConfig(
+        name = "DeepSeek",
+        kind = ProviderKind.OPENAI_COMPATIBLE,
+        baseUrl = DEEPSEEK_DEFAULT_BASE_URL,
+        chatModel = DEEPSEEK_DEFAULT_MODEL,
+        visionModel = DEEPSEEK_DEFAULT_MODEL,
+        ocrModel = DEEPSEEK_DEFAULT_MODEL
+    )
+    ProviderPreset.ANTHROPIC_MESSAGES -> ModelProviderConfig(
+        name = "Anthropic Messages",
+        kind = ProviderKind.ANTHROPIC_MESSAGES,
+        baseUrl = "https://api.anthropic.com/v1",
+        chatModel = "claude-opus-4-6",
+        visionModel = "claude-opus-4-6",
+        ocrModel = "claude-opus-4-6"
+    )
+}
 
 fun defaultAssistants(): List<AssistantPreset> = listOf(
     defaultAssistant(),

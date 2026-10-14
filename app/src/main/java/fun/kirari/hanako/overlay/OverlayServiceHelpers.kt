@@ -95,6 +95,24 @@ internal fun openMainActivity(context: android.content.Context) {
     )
 }
 
+/**
+ * 跳转主 App 并请求打开「聊天」页。
+ *
+ * 通过 [EXTRA_OPEN_CHAT] 通知 Activity 将初始 tab 切到 Chat；由于使用
+ * `FLAG_ACTIVITY_SINGLE_TOP`，Activity 已在前台时走 `onNewIntent`，同样生效。
+ */
+internal fun openMainActivityForChat(context: android.content.Context) {
+    context.startActivity(
+        Intent(context, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra(EXTRA_OPEN_CHAT, true)
+        }
+    )
+}
+
+/** 通知主 Activity 打开聊天页的 Intent extra。 */
+const val EXTRA_OPEN_CHAT = "fun.kirari.hanako.overlay.EXTRA_OPEN_CHAT"
+
 internal fun OverlayService.vibrateShort() {
     runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

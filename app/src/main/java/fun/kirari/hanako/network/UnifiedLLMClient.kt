@@ -28,6 +28,7 @@ internal class UnifiedLLMClient(
             ProviderKind.OPENAI_COMPATIBLE -> OpenAiChatAdapter(sseClient, json)
             ProviderKind.OPENAI_RESPONSES -> OpenAiResponsesAdapter(sseClient, json)
             ProviderKind.ANTHROPIC -> AnthropicAdapter(sseClient, json)
+            ProviderKind.ANTHROPIC_MESSAGES -> AnthropicAdapter(sseClient, json)
             ProviderKind.GOOGLE -> GoogleAdapter(sseClient, json)
         }
         return adapter.stream(

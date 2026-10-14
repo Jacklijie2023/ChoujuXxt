@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import `fun`.kirari.hanako.HanakoApplication
+import `fun`.kirari.hanako.chat.ChatModelCatalog
+import `fun`.kirari.hanako.chat.ChatSessionHolder
 import `fun`.kirari.hanako.data.AppSettings
 import `fun`.kirari.hanako.data.AssistantPreset
 import `fun`.kirari.hanako.data.AutomationSettings
@@ -12,7 +14,9 @@ import `fun`.kirari.hanako.data.ModelProviderConfig
 import `fun`.kirari.hanako.data.ModelSelection
 import `fun`.kirari.hanako.data.ProcessingResult
 import `fun`.kirari.hanako.data.ProcessingRoute
+import `fun`.kirari.hanako.data.ProviderPreset
 import `fun`.kirari.hanako.data.ScreenCaptureMethod
+import `fun`.kirari.hanako.data.createProvider
 import `fun`.kirari.hanako.data.SettingsRepository
 import `fun`.kirari.hanako.data.defaultAssistant
 import `fun`.kirari.hanako.data.defaultProvider
@@ -49,6 +53,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val localOcrManager: LocalOcrManager = container.localOcrManager
     private val providerModelsApi = ProviderModelsApi(container.networkClientProvider)
 
+    /** 全局单例聊天会话（由 AppContainer 注入，供聊天页面与后续 P3 迷你聊天共享）。 */
+    internal val chatSessionHolder: ChatSessionHolder = container.chatSessionHolder
+
+    /** 聊天模型全量列表内存缓存（聊天页与迷你窗共用同一实例）。 */
+    internal val chatModelCatalog: ChatModelCatalog = container.chatModelCatalog
+
+    /**
+     * 「打开聊天页」请求信号。
+     *
+     * 值递增代表一次新的跳转请求；由 [HanakoApp] 消费后把当前 tab 切到 Chat。
+     * 悬浮球迷你窗「打开」按钮（含 Activity 已在前台时的 onNewIntent）通过它路由。
+     */
+    private val _openChatRequests = MutableStateFlow(0)
+    val openChatRequests: StateFlow<Int> = _openChatRequests.asStateFlow()
+
+    /** 请求主界面切换到聊天页。 */
+    fun requestOpenChat() {
+        _openChatRequests.value += 1
+    }
+
     private val _connectionTestState = MutableStateFlow(ConnectionTestState())
     val connectionTestState: StateFlow<ConnectionTestState> = _connectionTestState.asStateFlow()
 
@@ -72,10 +96,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun addProvider() {
+    fun addProvider(preset: ProviderPreset = ProviderPreset.CUSTOM) {
         viewModelScope.launch {
             repository.update { current ->
-                val provider = ModelProviderConfig(name = "自定义提供方 ${current.providers.size + 1}")
+                val provider = preset.createProvider(current.providers.size + 1)
                 current.copy(
                     providers = current.providers + provider,
                     selectedProviderId = provider.id
@@ -203,6 +227,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleFavoriteModel(providerId: String, modelId: String) =
         repository.toggleFavoriteModel(viewModelScope, providerId, modelId)
+
+    fun addFavoriteModel(providerId: String, modelId: String) =
+        repository.addFavoriteModel(viewModelScope, providerId, modelId)
 
     fun removeFavoriteModel(providerId: String, modelId: String) =
         repository.removeFavoriteModel(viewModelScope, providerId, modelId)

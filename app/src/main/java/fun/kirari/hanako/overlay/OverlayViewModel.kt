@@ -9,6 +9,8 @@ import `fun`.kirari.hanako.AppContainer
 import `fun`.kirari.hanako.automation.BubbleEvent
 import `fun`.kirari.hanako.automation.BubbleState
 import `fun`.kirari.hanako.automation.BubbleStateMachine
+import `fun`.kirari.hanako.chat.ChatModelCatalog
+import `fun`.kirari.hanako.chat.ChatSessionHolder
 import `fun`.kirari.hanako.data.AutomationActionType
 import `fun`.kirari.hanako.data.ModelPurpose
 import `fun`.kirari.hanako.data.ProcessingEvent
@@ -16,12 +18,16 @@ import `fun`.kirari.hanako.data.ProcessingResult
 import `fun`.kirari.hanako.data.ProcessingRoute
 import `fun`.kirari.hanako.data.ProcessingStatus
 import `fun`.kirari.hanako.data.ModelSelection
+import `fun`.kirari.hanako.data.ModelProviderConfig
 import `fun`.kirari.hanako.data.SettingsRepository
 import `fun`.kirari.hanako.debug.AppDebugLogStore
 import `fun`.kirari.hanako.localocr.LocalOcrManager
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.TimeoutCancellationException
@@ -34,7 +40,11 @@ import kotlinx.coroutines.withTimeout
 internal class OverlayViewModel(
     private val appContext: Context,
     private val repository: SettingsRepository,
-    private val pipeline: ProcessingPipeline
+    private val pipeline: ProcessingPipeline,
+    /** 与主 App「聊天」页共享的全局单例会话（P3 迷你聊天复用同一实例）。 */
+    val chatSessionHolder: ChatSessionHolder,
+    /** 聊天模型全量列表内存缓存（与主聊天页共用同一实例，保证迷你窗模型选择一致）。 */
+    val chatModelCatalog: ChatModelCatalog
 ) : ViewModel() {
     private val tag = "HanakoOverlayVM"
     private val processingTimeoutMillis = 90_000L
@@ -45,6 +55,11 @@ internal class OverlayViewModel(
     
     private val _uiState = MutableStateFlow(OverlayUiState())
     val uiState: StateFlow<OverlayUiState> = _uiState.asStateFlow()
+
+    /** `settings.providers` 快照，供迷你聊天模型选择弹窗使用（与主聊天页同一数据源）。 */
+    val providers: StateFlow<List<ModelProviderConfig>> = _uiState
+        .map { it.settings.providers }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     init {
         viewModelScope.launch {
@@ -105,6 +120,7 @@ internal class OverlayViewModel(
                         working = false,
                         sheetVisible = true,
                         sheetMode = OverlaySheetMode.CROP,
+                        miniChatVisible = false,
                         autoRunState = AutoRunState.IDLE,
                         autoCopiedLabel = null
                     )
@@ -116,7 +132,8 @@ internal class OverlayViewModel(
                     it.copy(
                         error = error.message ?: "截屏失败",
                         sheetVisible = true,
-                        sheetMode = OverlaySheetMode.CROP
+                        sheetMode = OverlaySheetMode.CROP,
+                        miniChatVisible = false
                     )
                 }
             }
@@ -222,7 +239,8 @@ internal class OverlayViewModel(
                     error = null,
                     working = true,
                     sheetVisible = true,
-                    sheetMode = OverlaySheetMode.RESULT
+                    sheetMode = OverlaySheetMode.RESULT,
+                    miniChatVisible = false
                 )
             }
             upsertHistory(baseResult)
@@ -494,7 +512,32 @@ internal class OverlayViewModel(
             is BubbleState.Processing -> {
                 cancelActiveAutoProcessing()
             }
-            else -> {}
+            else -> {
+                // 非截屏流程状态（Idle / ShowingLetters / Copied 等）：双击切换迷你聊天小窗。
+                // 保持 MultiPageCapture*/Processing 的既有双击语义不变。
+                toggleMiniChat()
+            }
+        }
+    }
+
+    /** 切换迷你聊天小窗可见性（双击悬浮球时调用）。 */
+    fun toggleMiniChat() {
+        setMiniChatVisible(!_uiState.value.miniChatVisible)
+    }
+
+    /**
+     * 设置迷你聊天小窗可见性。
+     *
+     * 与全屏底部抽屉 [OverlayUiState.sheetVisible] 互斥：打开迷你聊天即收起抽屉，
+     * 避免两个浮层叠加导致输入焦点与触摸冲突。
+     */
+    fun setMiniChatVisible(visible: Boolean) {
+        AppDebugLogStore.i(tag, "setMiniChatVisible visible=$visible")
+        _uiState.update { state ->
+            state.copy(
+                miniChatVisible = visible,
+                sheetVisible = if (visible) false else state.sheetVisible
+            )
         }
     }
 
@@ -553,7 +596,8 @@ internal class OverlayViewModel(
             it.copy(
                 webViewUrl = url.ifBlank { "https://cn.bing.com" },
                 sheetVisible = true,
-                sheetMode = OverlaySheetMode.WEBVIEW
+                sheetMode = OverlaySheetMode.WEBVIEW,
+                miniChatVisible = false
             )
         }
     }
@@ -631,6 +675,7 @@ internal class OverlayViewModel(
                     working = true,
                     sheetVisible = true,
                     sheetMode = OverlaySheetMode.RESULT,
+                    miniChatVisible = false,
                     autoRunState = AutoRunState.IDLE,
                     autoCopiedLabel = null
                 )
@@ -970,7 +1015,9 @@ internal class OverlayViewModel(
                     return OverlayViewModel(
                         appContext = appContext,
                         repository = container.settingsRepository,
-                        pipeline = ProcessingPipeline(appContext, container.unifiedLLMClient, container.localOcrManager)
+                        pipeline = ProcessingPipeline(appContext, container.unifiedLLMClient, container.localOcrManager),
+                        chatSessionHolder = container.chatSessionHolder,
+                        chatModelCatalog = container.chatModelCatalog
                     ) as T
                 }
             }

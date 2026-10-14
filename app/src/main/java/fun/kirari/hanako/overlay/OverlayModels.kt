@@ -42,7 +42,14 @@ internal data class OverlayUiState(
     val autoRunState: AutoRunState = AutoRunState.IDLE,
     val autoCopiedLabel: String? = null,
     val bubbleState: BubbleState = BubbleState.Idle,
-    val webViewUrl: String = ""
+    val webViewUrl: String = "",
+    /**
+     * 迷你聊天小窗可见性。
+     *
+     * 独立于 [sheetVisible]/[sheetMode]（全屏底部抽屉），二者互斥，互不复用字段，
+     * 避免迷你聊天与截图抽屉状态相互污染。
+     */
+    val miniChatVisible: Boolean = false
 )
 
 
