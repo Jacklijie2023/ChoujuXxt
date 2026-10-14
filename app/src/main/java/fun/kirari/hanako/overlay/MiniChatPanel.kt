@@ -306,6 +306,17 @@ internal fun MiniChatPanel(
                                 // 提示用户到主界面聊天页展开功能面板授权。
                                 Toast.makeText(context, "请在主界面聊天页授权相册权限", Toast.LENGTH_SHORT).show()
                             },
+                            // 迷你窗宿主是 overlay Service，无 Activity token，
+                            // 无法直接拉起系统相机 / 相册 / 文件选择器，提示到主界面聊天页使用。
+                            onCamera = {
+                                Toast.makeText(context, "请在主界面聊天页使用拍照", Toast.LENGTH_SHORT).show()
+                            },
+                            onGallery = {
+                                Toast.makeText(context, "请在主界面聊天页使用相册", Toast.LENGTH_SHORT).show()
+                            },
+                            onFile = {
+                                Toast.makeText(context, "请在主界面聊天页选择本地文件", Toast.LENGTH_SHORT).show()
+                            },
                             overlaySafe = true,
                             modifier = Modifier.padding(top = 6.dp)
                         )

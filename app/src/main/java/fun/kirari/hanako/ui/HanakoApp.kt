@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
@@ -230,7 +231,13 @@ fun HanakoApp(viewModel: MainViewModel) {
                 // 聊天页自带轻量顶栏并处理状态栏 inset，此处不再渲染全局 TopAppBar，
                 // 避免「顶死」标题栏叠加导致聊天区有效面积过小。
                 val showGlobalTopBar = !(currentRoute == ROUTE_HOME_SHELL && currentScreen == Screen.Chat)
-                if (showGlobalTopBar) {
+                // 用 AnimatedVisibility 做高度过渡：直接 if 会让顶栏高度瞬间在 0 与「栏高」之间跳变，
+                // 导致分页内容区高度骤变（用户感知为切页「一卡一卡」）。这里让顶栏平滑收起/展开。
+                AnimatedVisibility(
+                    visible = showGlobalTopBar,
+                    enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(),
+                    exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut()
+                ) {
                     CenterAlignedTopAppBar(
                         title = {
                             Text(
@@ -767,7 +774,10 @@ private fun MainShellScreen(
     HorizontalPager(
         state = pagerState,
         modifier = Modifier.fillMaxSize(),
-        userScrollEnabled = true
+        userScrollEnabled = true,
+        // 预组合相邻一页：避免切换时在动画过程中才去组合目标页（聊天页组合较重），
+        // 把组合开销提前到空闲帧，消除切页卡顿。
+        beyondViewportPageCount = 1
     ) { page ->
         Box(
             modifier = Modifier

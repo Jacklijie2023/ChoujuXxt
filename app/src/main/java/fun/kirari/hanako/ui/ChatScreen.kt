@@ -1,7 +1,15 @@
 package `fun`.kirari.hanako.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -16,6 +24,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +52,7 @@ import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PushPin
@@ -73,12 +83,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -86,6 +101,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.core.content.FileProvider
+import coil.compose.AsyncImage
 import `fun`.kirari.hanako.chat.ChatModelCatalog
 import `fun`.kirari.hanako.chat.ChatSessionHolder
 import `fun`.kirari.hanako.chat.splitSessionsByTime
@@ -93,6 +110,8 @@ import `fun`.kirari.hanako.copyToClipboardWithToast
 import `fun`.kirari.hanako.data.ChatRole
 import `fun`.kirari.hanako.data.ChatSession
 import `fun`.kirari.hanako.data.ModelProviderConfig
+import java.io.File
+import java.util.Locale
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
@@ -133,6 +152,96 @@ internal fun ChatScreen(
     // 历史抽屉开关：用普通 remember（非 rememberSaveable），避免「已展开」状态跨 Tab 被恢复。
     var showDrawer by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    // 用于「点击空白处收起键盘」以及「打开 + 面板时收起键盘」。
+    val focusManager = LocalFocusManager.current
+
+    // ---- 真实接入手机系统能力：拍照 / 相册 / 本地文件 / 语音输入 / 语音播放 ----
+    // 已选内容（拍照、相册、本地文件）预览；图片显示缩略图，其它显示文件名称。
+    var attachment by remember { mutableStateOf<PickedAttachment?>(null) }
+    // 拍照输出 Uri：先建好 FileProvider Uri 再交给系统相机写入。
+    var cameraUri by remember { mutableStateOf<Uri?>(null) }
+
+    // 拍照：拉起系统相机（ACTION_IMAGE_CAPTURE），结果写入 FileProvider 暴露的 Uri。
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture()
+    ) { success ->
+        val uri = cameraUri
+        if (success && uri != null) {
+            attachment = PickedAttachment(uri = uri, name = "拍摄照片.jpg", isImage = true)
+            Toast.makeText(context, "已拍摄照片", Toast.LENGTH_SHORT).show()
+        } else if (!success) {
+            Toast.makeText(context, "已取消拍照", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 相册：拉起系统照片选择器（无需申请存储权限，读取由系统授权临时可读）。
+    val galleryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            attachment = PickedAttachment(
+                uri = uri,
+                name = queryDisplayName(context, uri),
+                isImage = true
+            )
+            Toast.makeText(context, "已选择照片", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 本地文件：拉起系统文件选择器。
+    val fileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            val name = queryDisplayName(context, uri)
+            attachment = PickedAttachment(uri = uri, name = name, isImage = false)
+            Toast.makeText(context, "已选择文件：$name", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 语音输入：拉起系统语音识别（RecognizerIntent），识别结果写入输入框。
+    val speechLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val recognized = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!recognized.isNullOrBlank()) {
+                input = if (input.isBlank()) recognized else "$input $recognized"
+            }
+        }
+    }
+
+    // 语音播放：系统 TTS 朗读 AI 回复正文。
+    val ttsReady = remember { mutableStateOf(false) }
+    val tts = remember {
+        TextToSpeech(context) { status -> ttsReady.value = status == TextToSpeech.SUCCESS }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            tts.stop()
+            tts.shutdown()
+        }
+    }
+    val speak: (String) -> Unit = { raw ->
+        val speech = stripMarkdownForSpeech(raw)
+        when {
+            speech.isBlank() ->
+                Toast.makeText(context, "没有可朗读的内容", Toast.LENGTH_SHORT).show()
+
+            ttsReady.value ->
+                tts.speak(
+                    speech,
+                    TextToSpeech.QUEUE_FLUSH,
+                    null,
+                    "hanako_${System.currentTimeMillis()}"
+                )
+
+            else ->
+                Toast.makeText(context, "语音播放尚未就绪，请稍后重试", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     // 离开聊天页时立即收起抽屉（DisposableEffect 在组合提交后同步执行，不留残留帧）。
     DisposableEffect(isActive) {
@@ -188,35 +297,100 @@ internal fun ChatScreen(
                 }
             }
 
-            if (session.messages.isEmpty()) {
-                // 空会话默认招呼词（参考通义千问欢迎语）：仅 UI 展示，不写入会话历史。
-                GreetingBubble(
+            // 消息区：点击输入框以外的空白处自动收起键盘。
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .pointerInput(Unit) {
+                        detectTapGestures { focusManager.clearFocus() }
+                    }
+            ) {
+                if (session.messages.isEmpty()) {
+                    // 空会话默认招呼词（参考通义千问欢迎语）：仅 UI 展示，不写入会话历史。
+                    GreetingBubble(modifier = Modifier.fillMaxSize())
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        items(session.messages, key = { it.id }) { message ->
+                            ChatMessageItem(
+                                message = message,
+                                onRetry = holder::retry,
+                                onCopy = {
+                                    copyToClipboardWithToast(
+                                        context = context,
+                                        label = "Hanako 回复",
+                                        text = message.content,
+                                        toastText = "已复制"
+                                    )
+                                },
+                                onRegenerate = holder::retry,
+                                onSpeak = speak
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 已选内容预览（拍照 / 相册 / 本地文件 的真实结果）：图片显示缩略图，其它显示文件名。
+            attachment?.let { picked ->
+                Row(
                     modifier = Modifier
-                        .weight(1f)
                         .fillMaxWidth()
-                )
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(session.messages, key = { it.id }) { message ->
-                        ChatMessageItem(
-                            message = message,
-                            onRetry = holder::retry,
-                            onCopy = {
-                                copyToClipboardWithToast(
-                                    context = context,
-                                    label = "Hanako 回复",
-                                    text = message.content,
-                                    toastText = "已复制"
-                                )
-                            },
-                            onRegenerate = holder::retry
+                    if (picked.isImage) {
+                        AsyncImage(
+                            model = picked.uri,
+                            contentDescription = picked.name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Folder,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = picked.name,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "图片 / 文件发送能力即将接入",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(
+                        onClick = { attachment = null },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "移除已选内容",
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
@@ -243,7 +417,17 @@ internal fun ChatScreen(
                             targetValue = if (panelExpanded) 45f else 0f,
                             label = "plusRotation"
                         )
-                        IconButton(onClick = { panelExpanded = !panelExpanded }) {
+                        IconButton(
+                            onClick = {
+                                if (panelExpanded) {
+                                    panelExpanded = false
+                                } else {
+                                    // 展开「+」面板时先收起键盘：键盘与面板互斥，不共存。
+                                    focusManager.clearFocus()
+                                    panelExpanded = true
+                                }
+                            }
+                        ) {
                             Icon(
                                 Icons.Default.Add,
                                 contentDescription = if (panelExpanded) "收起输入功能" else "展开输入功能",
@@ -253,7 +437,12 @@ internal fun ChatScreen(
                         OutlinedTextField(
                             value = input,
                             onValueChange = { input = it },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .onFocusChanged { state ->
+                                    // 点输入框唤起键盘时，自动收起「+」面板（与键盘互斥）。
+                                    if (state.isFocused && panelExpanded) panelExpanded = false
+                                },
                             placeholder = { Text("询问任何问题…") },
                             shape = RoundedCornerShape(28.dp),
                             maxLines = 4,
@@ -266,7 +455,26 @@ internal fun ChatScreen(
                         )
                         IconButton(
                             onClick = {
-                                Toast.makeText(context, "语音功能正在接入", Toast.LENGTH_SHORT).show()
+                                // 真实拉起系统语音识别：识别结果回填到输入框。
+                                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                    putExtra(
+                                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                                    )
+                                    putExtra(
+                                        RecognizerIntent.EXTRA_LANGUAGE,
+                                        Locale.getDefault().toLanguageTag()
+                                    )
+                                    putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出你的问题")
+                                }
+                                runCatching { speechLauncher.launch(intent) }
+                                    .onFailure {
+                                        Toast.makeText(
+                                            context,
+                                            "未找到可用的语音识别服务",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
                             }
                         ) {
                             Icon(Icons.Default.Mic, contentDescription = "语音输入")
@@ -301,6 +509,46 @@ internal fun ChatScreen(
                         onRequestPermission = {
                             photoPermissionLauncher.launch(photoReadPermission())
                         },
+                        // 拍照：先建 FileProvider Uri，再真实拉起系统相机写入。
+                        onCamera = {
+                            val uri = createCameraImageUri(context)
+                            cameraUri = uri
+                            runCatching { takePictureLauncher.launch(uri) }
+                                .onFailure {
+                                    Toast.makeText(
+                                        context,
+                                        "未找到可用的相机应用",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                        },
+                        // 相册：真实拉起系统照片选择器。
+                        onGallery = {
+                            runCatching {
+                                galleryLauncher.launch(
+                                    PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageOnly
+                                    )
+                                )
+                            }.onFailure {
+                                Toast.makeText(
+                                    context,
+                                    "未找到可用的相册选择器",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        },
+                        // 本地文件：真实拉起系统文件选择器。
+                        onFile = {
+                            runCatching { fileLauncher.launch(arrayOf("*/*")) }
+                                .onFailure {
+                                    Toast.makeText(
+                                        context,
+                                        "未找到可用的文件选择器",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                        },
                         modifier = Modifier.padding(top = 8.dp)
                     )
                 }
@@ -331,24 +579,32 @@ internal fun ChatScreen(
                         .widthIn(max = 360.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerLow
                 ) {
-                    SessionHistoryDrawer(
-                        // 仅展示「已使用」的会话（有消息）；空的新会话不进入历史列表。
-                        sessions = sessions.filter { it.messages.isNotEmpty() },
-                        currentSessionId = session.id,
-                        onClose = { showDrawer = false },
-                        onSelect = { id ->
-                            holder.selectSession(id)
-                            showDrawer = false
-                        },
-                        onRename = holder::renameSession,
-                        onDelete = holder::deleteSession,
-                        onDeleteSessions = holder::deleteSessions,
-                        onTogglePin = holder::togglePin,
-                        onNew = {
-                            holder.newSession()
-                            showDrawer = false
-                        }
-                    )
+                    // 面板背景延伸到状态栏下，但内容整体下移一个状态栏高度，
+                    // 避免「历史」标题 / 搜索 / 关闭 图标被状态栏遮挡。
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding()
+                    ) {
+                        SessionHistoryDrawer(
+                            // 仅展示「已使用」的会话（有消息）；空的新会话不进入历史列表。
+                            sessions = sessions.filter { it.messages.isNotEmpty() },
+                            currentSessionId = session.id,
+                            onClose = { showDrawer = false },
+                            onSelect = { id ->
+                                holder.selectSession(id)
+                                showDrawer = false
+                            },
+                            onRename = holder::renameSession,
+                            onDelete = holder::deleteSession,
+                            onDeleteSessions = holder::deleteSessions,
+                            onTogglePin = holder::togglePin,
+                            onNew = {
+                                holder.newSession()
+                                showDrawer = false
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1186,3 +1442,37 @@ private fun RenameCard(
         }
     }
 }
+
+/** 输入面板已选内容（拍照 / 相册 / 本地文件 的真实结果）。 */
+private data class PickedAttachment(
+    val uri: Uri,
+    val name: String,
+    val isImage: Boolean
+)
+
+/**
+ * 生成拍照输出 Uri：写入应用 cacheDir/shared_images，
+ * 经 FileProvider（authorities = `${applicationId}.fileprovider`）暴露给系统相机写入。
+ */
+private fun createCameraImageUri(context: Context): Uri {
+    val dir = File(context.cacheDir, "shared_images").apply { if (!exists()) mkdirs() }
+    val file = File.createTempFile("camera_", ".jpg", dir)
+    return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}
+
+/** 查询 content Uri 的显示名（用于本地文件 / 相册选择结果的预览标签）。 */
+private fun queryDisplayName(context: Context, uri: Uri): String =
+    runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+        }
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+        ?: uri.lastPathSegment?.takeIf { it.isNotBlank() }
+        ?: "已选内容"
+
+/** 朗读前对 Markdown 标记做轻量清理，避免把 # * ` > 等符号读出来。 */
+private fun stripMarkdownForSpeech(text: String): String =
+    text.replace(Regex("[#*`>_~\\[\\]()]"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()

@@ -76,6 +76,7 @@ internal fun HanakoAvatar(modifier: Modifier = Modifier, size: Dp = 28.dp) {
  *
  * @param compact 迷你窗精简模式：缩小字号、宽度与头像尺寸。
  * @param showQuickActions 是否显示快捷 pill 与操作栏（迷你窗关闭以保持紧凑）。
+ * @param onSpeak 「语音播放」回调（由宿主接入系统 TTS），入参为该条 AI 回复正文。
  */
 @Composable
 internal fun ChatMessageItem(
@@ -83,6 +84,7 @@ internal fun ChatMessageItem(
     onRetry: () -> Unit,
     onCopy: () -> Unit,
     onRegenerate: () -> Unit,
+    onSpeak: (String) -> Unit = {},
     compact: Boolean = false,
     showQuickActions: Boolean = true,
     modifier: Modifier = Modifier
@@ -218,9 +220,7 @@ internal fun ChatMessageItem(
                     )
                 }
                 IconButton(
-                    onClick = {
-                        Toast.makeText(context, "语音播放功能正在接入", Toast.LENGTH_SHORT).show()
-                    },
+                    onClick = { onSpeak(message.content) },
                     modifier = Modifier.size(30.dp)
                 ) {
                     Icon(

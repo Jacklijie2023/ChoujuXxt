@@ -8,7 +8,6 @@ import android.util.Size
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -184,28 +183,30 @@ private fun PhotoThumb(photo: PhonePhoto, modifier: Modifier = Modifier) {
 private fun GalleryActionTile(
     icon: ImageVector,
     label: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = Modifier
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = modifier
             .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 6.dp)
+            .padding(vertical = 6.dp)
     ) {
         Surface(
             shape = CircleShape,
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Box(
-                modifier = Modifier.size(44.dp),
+                modifier = Modifier.size(52.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     icon,
                     contentDescription = label,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp)
                 )
             }
         }
@@ -220,10 +221,14 @@ private fun GalleryActionTile(
 /**
  * 输入区「+」展开后的功能面板（图 4/5 形态）。
  *
- * - 功能行：拍照（占位）/ 相册（无权限时请求权限）/ 本地文件（占位）。
+ * - 功能行：拍照 / 相册 / 本地文件三项等宽并排、间距一致；点击由宿主真实拉起
+ *   系统相机（ACTION_IMAGE_CAPTURE）/ 系统相册选择器（PickVisualMedia）/ 系统文件选择器（OpenDocument）。
  * - 相册浏览：顶部「全部照片 ▼」选择相册分类，下方照片网格（多选勾选）。
  * - 图片仅浏览与选择，不发送给 AI（多模态能力未接入）。
  *
+ * @param onCamera 宿主提供的「拍照」回调，负责真实拉起系统相机。
+ * @param onGallery 宿主提供的「相册」回调，负责真实拉起系统相册选择器。
+ * @param onFile 宿主提供的「本地文件」回调，负责真实拉起系统文件选择器。
  * @param overlaySafe 迷你窗（overlay Service 宿主，无 Activity token）时为 true：
  *   相册分类改用窗口内内联列表，不用 DropdownMenu（创建新窗口会触发 BadTokenException）。
  */
@@ -231,6 +236,9 @@ private fun GalleryActionTile(
 internal fun ChatInputActionPanel(
     hasPermission: Boolean,
     onRequestPermission: () -> Unit,
+    onCamera: () -> Unit,
+    onGallery: () -> Unit,
+    onFile: () -> Unit,
     modifier: Modifier = Modifier,
     overlaySafe: Boolean = false
 ) {
@@ -261,20 +269,32 @@ internal fun ChatInputActionPanel(
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
     ) {
+        // 三个功能项等宽并排、间距一致（参考图：拍照 / 相册 / 本地文件）。
         Row(
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp)
         ) {
-            GalleryActionTile(Icons.Default.CameraAlt, "拍照") {
-                Toast.makeText(context, "拍照功能正在接入", Toast.LENGTH_SHORT).show()
-            }
-            GalleryActionTile(Icons.Default.PhotoLibrary, "相册") {
-                if (!hasPermission) onRequestPermission()
-            }
-            GalleryActionTile(Icons.Default.Folder, "本地文件") {
-                Toast.makeText(context, "本地文件功能正在接入", Toast.LENGTH_SHORT).show()
-            }
+            GalleryActionTile(
+                icon = Icons.Default.CameraAlt,
+                label = "拍照",
+                onClick = { onCamera() },
+                modifier = Modifier.weight(1f)
+            )
+            GalleryActionTile(
+                icon = Icons.Default.PhotoLibrary,
+                label = "相册",
+                onClick = { onGallery() },
+                modifier = Modifier.weight(1f)
+            )
+            GalleryActionTile(
+                icon = Icons.Default.Folder,
+                label = "本地文件",
+                onClick = { onFile() },
+                modifier = Modifier.weight(1f)
+            )
         }
 
         Spacer(modifier = Modifier.height(6.dp))
