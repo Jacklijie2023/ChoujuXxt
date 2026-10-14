@@ -192,6 +192,16 @@ internal fun ChatScreen(
         }
     }
 
+    // 「+」面板照片条（图 3）：已加入则再次点击取消选择，未加入则加入。
+    val toggleImageAttachment: (Uri, String) -> Unit = { uri, name ->
+        val key = uri.toString()
+        attachments = if (attachments.any { it.uri.toString() == key }) {
+            attachments.filterNot { it.uri.toString() == key }
+        } else {
+            attachments + PickedAttachment(uri = uri, name = name, isImage = true)
+        }
+    }
+
     // 拍照：拉起系统相机（ACTION_IMAGE_CAPTURE），结果写入 FileProvider 暴露的 Uri。
     val takePictureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture()
@@ -692,9 +702,9 @@ internal fun ChatScreen(
                         },
                         // 相册：打开应用内全屏相册选择页（同一个页面，详见 AlbumPickerOverlay）。
                         onOpenAlbumPage = { albumPageOpen = true },
-                        // 面板照片条点击（单选式）：直接加入输入框顶部附件区。
+                        // 面板照片条点击（单选式）：已加入则取消，未加入则加入输入框顶部附件区。
                         onAddPhoto = { uri ->
-                            addImageAttachment(uri, queryDisplayName(context, uri))
+                            toggleImageAttachment(uri, queryDisplayName(context, uri))
                         },
                         // 已加入输入框顶部的照片 Uri（用于照片条上的勾选态）。
                         attachedUris = attachments.map { it.uri.toString() }.toSet(),

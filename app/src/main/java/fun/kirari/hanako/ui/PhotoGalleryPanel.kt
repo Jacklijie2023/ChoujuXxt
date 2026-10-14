@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -33,8 +34,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CameraAlt
@@ -63,6 +67,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -79,6 +84,13 @@ private data class PhonePhoto(
     val uri: Uri,
     val bucketName: String,
     val dateTakenMillis: Long
+)
+
+/** 相册分类信息：分类名 + 该分类首图（最新一张）Uri + 照片总数。 */
+private data class AlbumInfo(
+    val name: String,
+    val coverUri: Uri?,
+    val count: Int
 )
 
 /** 查询照片（按时间倒序；可按相册名过滤）。需有相册读取权限。 */
@@ -121,23 +133,39 @@ private fun queryPhotos(context: Context, album: String?): List<PhonePhoto> {
     }.getOrDefault(emptyList())
 }
 
-/** 查询相册分类名（去重，保持出现顺序）。 */
-private fun queryAlbums(context: Context): List<String> {
-    val projection = arrayOf(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+/** 查询相册分类信息（按拍照时间倒序：每个分类首图取该分类最新一张照片，并累计照片总数）。 */
+private fun queryAlbumInfos(context: Context): List<AlbumInfo> {
+    val projection = arrayOf(
+        MediaStore.Images.Media._ID,
+        MediaStore.Images.Media.BUCKET_DISPLAY_NAME
+    )
+    val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
     return runCatching {
         context.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             projection,
             null,
             null,
-            null
+            sortOrder
         )?.use { cursor ->
-            val column = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-            val buckets = LinkedHashSet<String>()
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val bucketColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            val albums = LinkedHashMap<String, AlbumInfo>()
             while (cursor.moveToNext()) {
-                cursor.getString(column)?.takeIf { it.isNotBlank() }?.let(buckets::add)
+                val name = cursor.getString(bucketColumn)?.takeIf { it.isNotBlank() } ?: continue
+                val uri = ContentUris.withAppendedId(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    cursor.getLong(idColumn)
+                )
+                val existing = albums[name]
+                albums[name] = if (existing == null) {
+                    // 已按拍摄时间倒序：分类中首次出现的即为最新一张，作为封面。
+                    AlbumInfo(name = name, coverUri = uri, count = 1)
+                } else {
+                    existing.copy(count = existing.count + 1)
+                }
             }
-            buckets.toList()
+            albums.values.toList()
         } ?: emptyList()
     }.getOrDefault(emptyList())
 }
@@ -145,27 +173,37 @@ private fun queryAlbums(context: Context): List<String> {
 /** 照片缩略图：API 29+ 走 [android.content.ContentResolver.loadThumbnail]，否则走 Thumbnails。 */
 @Composable
 private fun PhotoThumb(photo: PhonePhoto, modifier: Modifier = Modifier) {
+    UriThumb(uri = photo.uri, modifier = modifier)
+}
+
+/** 按 Uri 加载缩略图（照片单元格与相册分类首图共用）。 */
+@Composable
+private fun UriThumb(uri: Uri?, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val bitmap by produceState<ImageBitmap?>(initialValue = null, photo.uri) {
-        value = withContext(Dispatchers.IO) {
-            runCatching {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    context.contentResolver
-                        .loadThumbnail(photo.uri, Size(256, 256), null)
-                        .asImageBitmap()
-                } else {
-                    val id = photo.uri.lastPathSegment?.toLongOrNull()
-                    val thumb = id?.let {
-                        MediaStore.Images.Thumbnails.getThumbnail(
-                            context.contentResolver,
-                            it,
-                            MediaStore.Images.Thumbnails.MINI_KIND,
-                            null
-                        )
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, uri) {
+        value = if (uri == null) {
+            null
+        } else {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        context.contentResolver
+                            .loadThumbnail(uri, Size(256, 256), null)
+                            .asImageBitmap()
+                    } else {
+                        val id = uri.lastPathSegment?.toLongOrNull()
+                        val thumb = id?.let {
+                            MediaStore.Images.Thumbnails.getThumbnail(
+                                context.contentResolver,
+                                it,
+                                MediaStore.Images.Thumbnails.MINI_KIND,
+                                null
+                            )
+                        }
+                        thumb?.asImageBitmap()
                     }
-                    thumb?.asImageBitmap()
-                }
-            }.getOrNull()
+                }.getOrNull()
+            }
         }
     }
     val image = bitmap
@@ -262,7 +300,7 @@ internal fun ChatInputActionPanel(
 ) {
     val context = LocalContext.current
     var photos by remember { mutableStateOf<List<PhonePhoto>>(emptyList()) }
-    var albums by remember { mutableStateOf<List<String>>(emptyList()) }
+    var albumInfos by remember { mutableStateOf<List<AlbumInfo>>(emptyList()) }
     var selectedAlbum by remember { mutableStateOf<String?>(null) }
     var selectedUris by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showAlbumMenu by remember { mutableStateOf(false) }
@@ -281,9 +319,9 @@ internal fun ChatInputActionPanel(
     }
     LaunchedEffect(hasPermission) {
         if (hasPermission) {
-            albums = withContext(Dispatchers.IO) { queryAlbums(context) }
+            albumInfos = withContext(Dispatchers.IO) { queryAlbumInfos(context) }
         } else {
-            albums = emptyList()
+            albumInfos = emptyList()
         }
     }
 
@@ -382,20 +420,20 @@ internal fun ChatInputActionPanel(
                         tonalElevation = 2.dp
                     ) {
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                            AlbumOptionRow(
-                                label = "全部照片",
+                            AlbumInfoRow(
+                                info = totalAlbumInfo(albumInfos),
                                 selected = selectedAlbum == null,
                                 onClick = {
                                     selectedAlbum = null
                                     showAlbumMenu = false
                                 }
                             )
-                            albums.forEach { album ->
-                                AlbumOptionRow(
-                                    label = album,
-                                    selected = selectedAlbum == album,
+                            albumInfos.forEach { album ->
+                                AlbumInfoRow(
+                                    info = album,
+                                    selected = selectedAlbum == album.name,
                                     onClick = {
-                                        selectedAlbum = album
+                                        selectedAlbum = album.name
                                         showAlbumMenu = false
                                     }
                                 )
@@ -435,10 +473,18 @@ internal fun ChatInputActionPanel(
     }
 }
 
-/** 单一相册分类选项行（内联列表用）。 */
+/** 「全部照片」分类信息：封面取最新一张（分类列表已按时间倒序），总数取各分类求和。 */
+private fun totalAlbumInfo(albums: List<AlbumInfo>): AlbumInfo =
+    AlbumInfo(
+        name = "全部照片",
+        coverUri = albums.firstOrNull()?.coverUri,
+        count = albums.sumOf { it.count }
+    )
+
+/** 相册分类选项行（图 4）：左侧该分类首图缩略图 + 右侧分类名 + 分类照片总数。 */
 @Composable
-private fun AlbumOptionRow(
-    label: String,
+private fun AlbumInfoRow(
+    info: AlbumInfo,
     selected: Boolean,
     onClick: () -> Unit
 ) {
@@ -446,16 +492,29 @@ private fun AlbumOptionRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
+        UriThumb(
+            uri = info.coverUri,
+            modifier = Modifier
+                .size(52.dp)
+                .clip(RoundedCornerShape(10.dp))
         )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                info.name,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                "${info.count}张",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         if (selected) {
             Icon(
                 Icons.Default.Check,
@@ -654,7 +713,7 @@ internal fun AlbumPickerOverlay(
 ) {
     val context = LocalContext.current
     var photos by remember { mutableStateOf<List<PhonePhoto>>(emptyList()) }
-    var albums by remember { mutableStateOf<List<String>>(emptyList()) }
+    var albumInfos by remember { mutableStateOf<List<AlbumInfo>>(emptyList()) }
     var selectedAlbum by remember { mutableStateOf<String?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
     // 已选照片 Uri 列表（保持选择顺序，用于计数与「确认上传」）。
@@ -668,8 +727,8 @@ internal fun AlbumPickerOverlay(
         }
     }
     LaunchedEffect(hasPermission) {
-        albums = if (hasPermission) {
-            withContext(Dispatchers.IO) { queryAlbums(context) }
+        albumInfos = if (hasPermission) {
+            withContext(Dispatchers.IO) { queryAlbumInfos(context) }
         } else {
             emptyList()
         }
@@ -685,6 +744,11 @@ internal fun AlbumPickerOverlay(
             else -> selection + key
         }
     }
+
+    val gridState = rememberLazyGridState()
+    // 按住页面（照片网格以外区域）向下拖动收起页面的累计位移与阈值。
+    val dismissThresholdPx = with(LocalDensity.current) { 64.dp.toPx() }
+    var collapseAccum by remember { mutableStateOf(0f) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // 遮罩：点击关闭相册页。
@@ -708,7 +772,25 @@ internal fun AlbumPickerOverlay(
             shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
             color = MaterialTheme.colorScheme.surface
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    // 顶部栏 / 功能行 / 底部提示等非网格区域：按住向下拖动收起页面。
+                    .pointerInput(Unit) {
+                        detectVerticalDragGestures(
+                            onDragStart = { collapseAccum = 0f },
+                            onDragCancel = { collapseAccum = 0f },
+                            onDragEnd = { collapseAccum = 0f },
+                            onVerticalDrag = { _, dragAmount ->
+                                collapseAccum += dragAmount
+                                if (collapseAccum >= dismissThresholdPx) {
+                                    collapseAccum = 0f
+                                    onDismiss()
+                                }
+                            }
+                        )
+                    }
+            ) {
                 // 顶部栏：左上角 × 关闭 + 居中可点击标题（切换相册分类）。
                 Box(
                     modifier = Modifier
@@ -748,21 +830,26 @@ internal fun AlbumPickerOverlay(
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                         tonalElevation = 2.dp
                     ) {
-                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                            AlbumOptionRow(
-                                label = "全部照片",
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 360.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(vertical = 4.dp)
+                        ) {
+                            AlbumInfoRow(
+                                info = totalAlbumInfo(albumInfos),
                                 selected = selectedAlbum == null,
                                 onClick = {
                                     selectedAlbum = null
                                     menuOpen = false
                                 }
                             )
-                            albums.forEach { album ->
-                                AlbumOptionRow(
-                                    label = album,
-                                    selected = selectedAlbum == album,
+                            albumInfos.forEach { album ->
+                                AlbumInfoRow(
+                                    info = album,
+                                    selected = selectedAlbum == album.name,
                                     onClick = {
-                                        selectedAlbum = album
+                                        selectedAlbum = album.name
                                         menuOpen = false
                                     }
                                 )
@@ -820,22 +907,56 @@ internal fun AlbumPickerOverlay(
                         EmptyPhotos()
                     }
                 } else {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(4),
+                    Box(
                         modifier = Modifier
                             .weight(1f)
-                            .fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                            .fillMaxWidth()
+                            // 网格区域（占页面大部分）：在 Initial 阶段旁路观察向下拖动，
+                            // 不消费事件，网格滚动不受影响；仅当按下时网格位于顶部才触发收起。
+                            .pointerInput(gridState) {
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        val down = awaitFirstDown(
+                                            requireUnconsumed = false,
+                                            pass = PointerEventPass.Initial
+                                        )
+                                        val startAtTop = gridState.firstVisibleItemIndex == 0 &&
+                                            gridState.firstVisibleItemScrollOffset == 0
+                                        var lastY = down.position.y
+                                        var accum = 0f
+                                        var handled = false
+                                        while (true) {
+                                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                                            val change = event.changes
+                                                .firstOrNull { it.id == down.id } ?: break
+                                            if (!change.pressed) break
+                                            accum += change.position.y - lastY
+                                            lastY = change.position.y
+                                            if (!handled && startAtTop && accum >= dismissThresholdPx) {
+                                                handled = true
+                                                onDismiss()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                     ) {
-                        items(photos, key = { it.uri.toString() }) { photo ->
-                            val key = photo.uri.toString()
-                            SelectablePhotoCell(
-                                photo = photo,
-                                selected = key in selection,
-                                onToggle = { toggle(key) }
-                            )
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(4),
+                            state = gridState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            items(photos, key = { it.uri.toString() }) { photo ->
+                                val key = photo.uri.toString()
+                                SelectablePhotoCell(
+                                    photo = photo,
+                                    selected = key in selection,
+                                    onToggle = { toggle(key) }
+                                )
+                            }
                         }
                     }
                 }

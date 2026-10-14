@@ -130,16 +130,6 @@ internal fun ModelChip(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f, fill = false)
             )
-            if (selectedProvider != null) {
-                Text(
-                    text = selectedProvider.name,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 44.dp)
-                )
-            }
             Icon(
                 imageVector = Icons.Default.ArrowDropDown,
                 contentDescription = null,

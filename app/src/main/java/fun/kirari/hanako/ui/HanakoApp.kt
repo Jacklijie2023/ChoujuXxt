@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -265,7 +266,10 @@ fun HanakoApp(viewModel: MainViewModel) {
             contentWindowInsets = if (currentRoute == ROUTE_HOME_SHELL && currentScreen == Screen.Chat) {
                 // 聊天页自带 statusBarsPadding（见 ChatScreen），此处清零 Scaffold 顶部 inset，
                 // 避免「Scaffold systemBars inset + ChatScreen statusBarsPadding」双重叠加导致顶部间距过大。
-                WindowInsets(0, 0, 0, 0)
+                // 底部仅保留系统导航条（手势条）inset：收起底部导航栏后历史抽屉「新建对话」与
+                // 底部提示仍需与屏幕底保持间距，不被手势条遮挡；键盘弹出时交由 ChatScreen 的
+                // imePadding 处理，避免与导航条 inset 叠加造成过大间距。
+                if (imeVisible) WindowInsets(0, 0, 0, 0) else WindowInsets.navigationBars
             } else {
                 ScaffoldDefaults.contentWindowInsets
             },
