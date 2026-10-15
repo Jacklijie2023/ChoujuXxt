@@ -465,7 +465,7 @@ internal fun ResultOverlaySheet(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                    // 内容顶部下拉 → 跟随手指收缩面板；上滑 → 展开恢复；松手 → 吸附（关闭/回停靠/回全展开）；快速下滑 → 关闭。
+                    // 内容顶部下拉 → 跟随手指收缩面板；上滑 → 展开恢复；松手 → 吸附（超过面板高度约 1/3 关闭，否则回弹全展开）；快速下滑 → 关闭。
                     // 采用与相册页一致的 Initial 阶段旁路观察：普通滚动事件不消费，内容可正常上下滚动；
                     // 仅当拖动开始时就位于顶部且首帧向下移动，才识别为「下拉跟随」手势并消费位移，保证面板 1:1 跟随手指。
                     .pointerInput(scrollState) {
@@ -475,6 +475,7 @@ internal fun ResultOverlaySheet(
                                     requireUnconsumed = false,
                                     pass = PointerEventPass.Initial
                                 )
+                                val downY = down.position.y
                                 var lastY = down.position.y
                                 var lastTime = down.uptimeMillis
                                 var pulling = false
@@ -500,9 +501,10 @@ internal fun ResultOverlaySheet(
                                         pulling = atTop && dy > 0
                                     }
                                     if (pulling) {
-                                        // 下拉收缩、上滑展开：跟随手指上下移动；消费本次位移，
-                                        // 阻止子级内容在面板手势期间同步滚动，保证面板 1:1 跟随手指。
-                                        onPanelDragBy(dy)
+                                        // 下拉收缩、上滑展开：位移按「手指相对按下点的累计位移」计算，
+                                        // 抵消面板高度变化带来的坐标漂移，消除抖动，保证面板 1:1 跟随手指；
+                                        // 消费本次位移，阻止子级内容在面板手势期间同步滚动。
+                                        onPanelDragBy(change.position.y - downY)
                                         change.consume()
                                     }
                                 }

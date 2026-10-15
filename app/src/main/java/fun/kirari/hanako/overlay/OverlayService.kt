@@ -537,7 +537,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
 
                     MotionEvent.ACTION_UP,
                     MotionEvent.ACTION_CANCEL -> {
-                        // 松手吸附：低于阈值关闭，否则回停靠/全展开。
+                        // 松手吸附：下拉超过面板高度约 1/3 → 关闭，否则回弹全展开。
                         settlePanel()
                         true
                     }
@@ -562,17 +562,16 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     }
 
     /**
-     * 松手吸附：高度被拖到低于停靠值 → 关闭面板；中段 → 回停靠高度；上段 → 回目标（全展开）高度。
+     * 松手吸附（与相册页一致）：下拉位移超过面板高度约 1/3 → 关闭；否则回弹到目标（全展开）高度。
      */
     private fun settlePanel() {
         val current = panelCurrentHeightPx
-        val dock = panelDockHeightPx
         val target = panelHeightPx
-        if (target <= 0 || dock <= 0) return
-        when {
-            current < dock -> overlayViewModel.closeSheet()
-            current < (dock + target) / 2 -> if (current != dock) animatePanelHeight(current, dock)
-            else -> if (current != target) animatePanelHeight(current, target)
+        if (target <= 0) return
+        if (current < target * 2 / 3) {
+            overlayViewModel.closeSheet()
+        } else if (current != target) {
+            animatePanelHeight(current, target)
         }
     }
 
