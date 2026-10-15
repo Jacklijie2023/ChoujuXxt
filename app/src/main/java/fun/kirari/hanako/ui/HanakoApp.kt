@@ -832,6 +832,12 @@ private fun HanakoHomeScreen(
                 onToggleOverlay = onToggleOverlay,
                 onStartAutoMode = {
                     if (!hasOverlayPermission) return@HeroSection
+                    // 悬浮球若正在运行（普通模式），先停止旧会话，再以自动模式全新启动，
+                    // 避免「长按启动进入自动模式」被运行状态静默阻断。
+                    if (overlayEnabled) {
+                        context.stopService(Intent(context, OverlayService::class.java))
+                        ScreenCaptureManager.stop(context, settings.screenCaptureMethod)
+                    }
                     when (
                         val result = ScreenCaptureManager.requestStart(
                             context = context,

@@ -57,6 +57,7 @@ import `fun`.kirari.hanako.data.AssistantPreset
 import `fun`.kirari.hanako.data.previewPrompt
 import `fun`.kirari.hanako.data.ProcessingRoute
 import `fun`.kirari.hanako.data.ScreenCaptureMethod
+import `fun`.kirari.hanako.debug.AppDebugLogStore
 import `fun`.kirari.hanako.util.HapticHelper
 import kotlinx.coroutines.delay
 
@@ -241,7 +242,12 @@ fun HeroSection(
                                     onToggleOverlay(!overlayEnabled && hasOverlayPermission)
                                 },
                                 onLongClick = {
-                                    if (!overlayEnabled && hasOverlayPermission) {
+                                    // 悬浮球是否在运行都不阻断长按：已运行时 onStartAutoMode 内部会先停止再以自动模式重启。
+                                    if (hasOverlayPermission) {
+                                        AppDebugLogStore.i(
+                                            "HeroSection",
+                                            "onLongClick enter auto mode overlayEnabled=$overlayEnabled"
+                                        )
                                         onStartAutoMode()
                                     }
                                 }

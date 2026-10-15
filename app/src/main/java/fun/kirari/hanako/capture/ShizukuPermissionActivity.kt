@@ -16,7 +16,9 @@ class ShizukuPermissionActivity : ComponentActivity() {
         val granted = grantResult == android.content.pm.PackageManager.PERMISSION_GRANTED
         ShizukuAuthorizationManager.setAuthorized(granted)
         if (granted) {
-            startService(
+            // OverlayService 声明了 foregroundServiceType，须用 startForegroundService 启动。
+            ContextCompat.startForegroundService(
+                this,
                 Intent(this, OverlayService::class.java).apply {
                     putExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE, launchMode.name)
                 }
@@ -46,7 +48,9 @@ class ShizukuPermissionActivity : ComponentActivity() {
         when {
             Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED -> {
                 ShizukuAuthorizationManager.setAuthorized(true)
-                startService(
+                // OverlayService 声明了 foregroundServiceType，须用 startForegroundService 启动。
+                ContextCompat.startForegroundService(
+                    this,
                     Intent(this, OverlayService::class.java).apply {
                         putExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE, launchMode.name)
                     }
