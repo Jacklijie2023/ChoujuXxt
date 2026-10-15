@@ -143,6 +143,10 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         dispatcher.onServicePreSuperOnStart()
+        AppDebugLogStore.i(
+            logTag,
+            "onStartCommand action=${intent?.action} launchModeExtra=${intent?.getStringExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE)}"
+        )
         when (intent?.action) {
             ACTION_STOP -> {
                 dismissPanel()

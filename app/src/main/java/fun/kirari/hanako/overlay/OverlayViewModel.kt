@@ -434,7 +434,8 @@ internal class OverlayViewModel(
      */
     fun handleSingleTap() {
         val currentState = bubbleStateMachine.currentState
-        AppDebugLogStore.i(tag, "handleSingleTap state=${currentState::class.simpleName}")
+        val launchMode = _uiState.value.launchMode
+        AppDebugLogStore.i(tag, "handleSingleTap state=${currentState::class.simpleName} launchMode=$launchMode")
         
         when (currentState) {
             is BubbleState.MultiPageCapture -> {
