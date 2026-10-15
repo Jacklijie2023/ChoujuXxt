@@ -153,7 +153,8 @@ internal class OverlayViewModel(
                         result = null,
                         error = null,
                         working = true,
-                        sheetVisible = false,
+                        sheetVisible = true,
+                        sheetMode = OverlaySheetMode.RESULT,
                         autoRunState = AutoRunState.RUNNING,
                         autoCopiedLabel = null
                     )
@@ -176,19 +177,21 @@ internal class OverlayViewModel(
                     result = null,
                     error = null,
                     working = true,
-                    sheetVisible = false,
+                    sheetVisible = true,
+                    sheetMode = OverlaySheetMode.RESULT,
                     autoRunState = AutoRunState.RUNNING,
                     autoCopiedLabel = null
                 )
             }
             bubbleStateMachine.dispatch(BubbleEvent.StartProcessing)
-            
+
             runCatching {
                 withContext(Dispatchers.IO) {
                     `fun`.kirari.hanako.capture.ScreenCaptureManager.captureLatestBitmap(appContext, _uiState.value.settings.screenCaptureMethod)
                 }
             }.onSuccess { bitmap ->
                 AppDebugLogStore.i(tag, "processFullScreen capture success width=${bitmap.width} height=${bitmap.height}")
+                _uiState.update { it.copy(screenshot = bitmap, selectedBitmap = bitmap) }
                 processAutoBitmap(bitmap)
             }.onFailure { error ->
                 if (error is CancellationException) {

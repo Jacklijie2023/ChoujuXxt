@@ -91,7 +91,7 @@ internal class SseStreamClient(
                         !firstDeltaReceived.get() &&
                         (t is SocketTimeoutException || t?.message?.contains("timeout", ignoreCase = true) == true)
                     ) {
-                        SocketTimeoutException("自动模式首字延迟超时（${firstDeltaTimeoutMillis / 1000} 秒）")
+                        SocketTimeoutException("首字延迟超时（${firstDeltaTimeoutMillis / 1000} 秒）")
                     } else {
                         t
                     }
@@ -122,7 +122,7 @@ internal class SseStreamClient(
                     )
                     finish {
                         cont.resumeWithException(
-                            SocketTimeoutException("自动模式首字延迟超时（${firstDeltaTimeoutMillis / 1000} 秒）")
+                            SocketTimeoutException("首字延迟超时（${firstDeltaTimeoutMillis / 1000} 秒）")
                         )
                     }
                 }
