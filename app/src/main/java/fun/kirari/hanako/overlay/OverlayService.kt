@@ -27,6 +27,8 @@ import android.widget.Toast
 import `fun`.kirari.hanako.automation.BubbleRenderer
 import `fun`.kirari.hanako.automation.BubbleState
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ServiceLifecycleDispatcher
@@ -419,7 +421,9 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
             WindowManager.LayoutParams.MATCH_PARENT,
             panelCurrentHeightPx,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -463,6 +467,11 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                 setViewTreeLifecycleOwner(this@OverlayService)
                 setViewTreeViewModelStoreOwner(this@OverlayService)
                 setViewTreeSavedStateRegistryOwner(this@OverlayService)
+                // 覆盖窗口内 Compose 内容禁用系统栏 inset 填充，避免导航栏 inset 造成底部空隙，
+                // 使分析页面内容与相册页一致、沾满到底部区域。
+                ViewCompat.setOnApplyWindowInsetsListener(this) { _, _ ->
+                    WindowInsetsCompat.CONSUMED
+                }
                 setContent {
                     `fun`.kirari.hanako.ui.theme.HanakoTheme {
                         OverlayPanel(
