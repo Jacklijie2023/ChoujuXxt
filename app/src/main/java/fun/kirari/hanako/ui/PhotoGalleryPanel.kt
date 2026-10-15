@@ -628,7 +628,7 @@ private fun DragUpPhotoStrip(
                     onDragCancel = { dragAccum = 0f },
                     onDragEnd = { dragAccum = 0f },
                     onVerticalDrag = { _, dragAmount ->
-                        if (!triggered) {
+                          if (!triggered) {
                             dragAccum += dragAmount
                             if (dragAccum <= -thresholdPx) {
                                 triggered = true
@@ -772,8 +772,8 @@ internal fun AlbumPickerOverlay(
     )
     // 页面可下拉的最大位移：整页高度（完全滑出后关闭）。
     fun maxDragPx(): Float = surfaceHeightPx.takeIf { it > 0 }?.toFloat() ?: (with(density) { 128.dp.toPx() })
-    // 关闭阈值：下拉超过页面高度约 2/3 才自动隐藏，否则回弹。
-    fun closeThresholdPx(): Float = maxDragPx() * 2f / 3f
+    // 关闭阈值：下拉超过页面高度约 1/3 才自动隐藏，否则回弹。
+    fun closeThresholdPx(): Float = maxDragPx() * 1f / 3f
 
     fun settleSheet() {
         if (closeTriggered) return
