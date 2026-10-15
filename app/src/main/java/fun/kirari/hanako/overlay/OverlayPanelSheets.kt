@@ -432,9 +432,7 @@ internal fun ResultOverlaySheet(
     contentAtTopChange: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
-    val density = LocalDensity.current
     val scrollState = rememberScrollState()
-    val panelMaxHeight = with(density) { panelHeightPx.toDp() }
     val answerText = uiState.liveAnswerText
     // 滚动位置变化会触发重组，从而同步面板宿主的拦截开关。
     val contentAtTop = scrollState.value <= 0
@@ -447,11 +445,10 @@ internal fun ResultOverlaySheet(
     ) {
         var closeRequested by remember { mutableStateOf(false) }
 
+        // 页面内容始终填满整个窗口：无论窗口当前高度如何（静止/动画/拖拽），
+        // 都不留透明底部条，避免下层应用（如哔哩哔哩导航栏）透过空隙可见。
         Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(panelMaxHeight)
-                .align(Alignment.BottomCenter),
+            modifier = Modifier.fillMaxSize(),
             shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
             tonalElevation = 8.dp
         ) {

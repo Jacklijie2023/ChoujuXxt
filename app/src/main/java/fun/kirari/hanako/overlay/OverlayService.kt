@@ -489,7 +489,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                 composeView,
                 FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
-                    targetHeightPx
+                    FrameLayout.LayoutParams.MATCH_PARENT
                 )
             )
             val handleView = createPanelHandleView()
