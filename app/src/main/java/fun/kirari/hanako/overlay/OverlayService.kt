@@ -452,6 +452,13 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         panelHandleParams = handleParams
 
         if (panelView == null) {
+            val panelRoot = PanelDragInterceptFrameLayout(this).apply {
+                setViewTreeLifecycleOwner(this@OverlayService)
+                setViewTreeViewModelStoreOwner(this@OverlayService)
+                setViewTreeSavedStateRegistryOwner(this@OverlayService)
+                clipChildren = true
+                clipToPadding = true
+            }
             val composeView = androidx.compose.ui.platform.ComposeView(this).apply {
                 setViewTreeLifecycleOwner(this@OverlayService)
                 setViewTreeViewModelStoreOwner(this@OverlayService)
@@ -462,27 +469,20 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                             viewModel = overlayViewModel,
                             onDismiss = { overlayViewModel.closeSheet() },
                             panelHeightPx = panelHeightPx,
-                            onPanelDragBy = ::dragPanelBy,
-                            onPanelSettle = ::settlePanel,
-                            onPanelFlingDown = { overlayViewModel.closeSheet() }
+                            contentAtTopChange = { atTop -> panelRoot.contentAtTop = atTop }
                         )
                     }
                 }
             }
-            val panelRoot = FrameLayout(this).apply {
-                setViewTreeLifecycleOwner(this@OverlayService)
-                setViewTreeViewModelStoreOwner(this@OverlayService)
-                setViewTreeSavedStateRegistryOwner(this@OverlayService)
-                clipChildren = true
-                clipToPadding = true
-                addView(
-                    composeView,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        targetHeightPx
-                    )
+            panelRoot.onDrag = ::dragPanelBy
+            panelRoot.onSettle = ::settlePanel
+            panelRoot.addView(
+                composeView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    targetHeightPx
                 )
-            }
+            )
             val handleView = createPanelHandleView()
             panelView = panelRoot
             panelContentView = composeView

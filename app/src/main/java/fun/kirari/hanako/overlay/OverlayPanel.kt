@@ -27,12 +27,8 @@ internal fun OverlayPanel(
     viewModel: OverlayViewModel,
     onDismiss: () -> Unit,
     panelHeightPx: Int = 0,
-    /** 内容滚动到顶部后继续下拉时，跟随手指收缩面板（deltaY>0 为下拉）。 */
-    onPanelDragBy: (Float) -> Unit = {},
-    /** 松手吸附：低于阈值关闭，否则回停靠/全展开。 */
-    onPanelSettle: () -> Unit = {},
-    /** 顶部向下快速甩动（fling）：直接关闭面板。 */
-    onPanelFlingDown: () -> Unit = {}
+    /** 内容区是否已滚动到顶部：由结果页上报，供面板宿主决定是否拦截下拉手势。 */
+    contentAtTopChange: (Boolean) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var modelPickerTarget by remember { mutableStateOf<ModelPurpose?>(null) }
@@ -59,9 +55,7 @@ internal fun OverlayPanel(
                 uiState = uiState,
                 onClose = onDismiss,
                 panelHeightPx = panelHeightPx,
-                onPanelDragBy = onPanelDragBy,
-                onPanelSettle = onPanelSettle,
-                onPanelFlingDown = onPanelFlingDown
+                contentAtTopChange = contentAtTopChange
             )
         }
 

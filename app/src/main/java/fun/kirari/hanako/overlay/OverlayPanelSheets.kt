@@ -7,7 +7,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -55,7 +54,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -87,9 +85,6 @@ import `fun`.kirari.hanako.ui.cropBitmap
 import `fun`.kirari.hanako.util.HapticHelper
 import kotlinx.coroutines.delay
 import kotlin.math.abs
-
-/** 内容区顶部向下甩动关闭面板的最小速度（px/s）。 */
-private const val PanelFlingDismissVelocityPx = 700f
 
 @Composable
 internal fun CropOverlaySheet(
@@ -433,18 +428,17 @@ internal fun ResultOverlaySheet(
     uiState: OverlayUiState,
     onClose: () -> Unit,
     panelHeightPx: Int,
-    /** 内容滚动到顶部后继续下拉时，跟随手指收缩面板。 */
-    onPanelDragBy: (Float) -> Unit = {},
-    /** 松手吸附：低于阈值关闭，否则回停靠/全展开。 */
-    onPanelSettle: () -> Unit = {},
-    /** 顶部向下快速甩动（fling）：直接关闭面板。 */
-    onPanelFlingDown: () -> Unit = {}
+    /** 内容区是否已滚动到顶部：上报给面板宿主，用于决定是否拦截下拉手势。 */
+    contentAtTopChange: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val scrollState = rememberScrollState()
     val panelMaxHeight = with(density) { panelHeightPx.toDp() }
     val answerText = uiState.liveAnswerText
+    // 滚动位置变化会触发重组，从而同步面板宿主的拦截开关。
+    val contentAtTop = scrollState.value <= 0
+    SideEffect { contentAtTopChange(contentAtTop) }
 
     Box(
         modifier = Modifier
@@ -465,56 +459,6 @@ internal fun ResultOverlaySheet(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                    // 内容顶部下拉 → 跟随手指收缩面板；上滑 → 展开恢复；松手 → 吸附（超过面板高度约 1/3 关闭，否则回弹全展开）；快速下滑 → 关闭。
-                    // 采用与相册页一致的 Initial 阶段旁路观察：普通滚动事件不消费，内容可正常上下滚动；
-                    // 仅当拖动开始时就位于顶部且首帧向下移动，才识别为「下拉跟随」手势并消费位移，保证面板 1:1 跟随手指。
-                    .pointerInput(scrollState) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                val down = awaitFirstDown(
-                                    requireUnconsumed = false,
-                                    pass = PointerEventPass.Initial
-                                )
-                                val downY = down.position.y
-                                var lastY = down.position.y
-                                var lastTime = down.uptimeMillis
-                                var pulling = false
-                                var maxDownVelocity = 0f
-                                while (true) {
-                                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                                    val change = event.changes
-                                        .firstOrNull { it.id == down.id } ?: break
-                                    if (!change.pressed) break
-                                    val atTop = scrollState.value <= 0
-                                    val dy = change.position.y - lastY
-                                    val now = change.uptimeMillis
-                                    val dt = now - lastTime
-                                    lastY = change.position.y
-                                    lastTime = now
-                                    if (dt > 0) {
-                                        val v = dy / dt * 1000f
-                                        if (v > maxDownVelocity) maxDownVelocity = v
-                                    }
-                                    if (!pulling) {
-                                        // 仅当拖动开始时就位于顶部、且首帧向下移动，才识别为「下拉跟随」手势，
-                                        // 避免内容滚动过程中（到达顶部边界的瞬间）误触发面板位移。
-                                        pulling = atTop && dy > 0
-                                    }
-                                    if (pulling) {
-                                        // 下拉收缩、上滑展开：位移按「手指相对按下点的累计位移」计算，
-                                        // 抵消面板高度变化带来的坐标漂移，消除抖动，保证面板 1:1 跟随手指；
-                                        // 消费本次位移，阻止子级内容在面板手势期间同步滚动。
-                                        onPanelDragBy(change.position.y - downY)
-                                        change.consume()
-                                    }
-                                }
-                                when {
-                                    pulling && maxDownVelocity > PanelFlingDismissVelocityPx -> onPanelFlingDown()
-                                    pulling -> onPanelSettle()
-                                }
-                            }
-                        }
-                    }
             ) {
                 SheetTitleRow(
                     title = {
