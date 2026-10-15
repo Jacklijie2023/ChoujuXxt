@@ -22,6 +22,11 @@ class ShizukuPermissionActivity : ComponentActivity() {
                     putExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE, launchMode.name)
                 }
             )
+            // 自动模式：授权完成后自动退到后台，避免停留本 App 导致后续截图截到本 App 界面。
+            if (launchMode == OverlayLaunchMode.AUTO) {
+                android.widget.Toast.makeText(this, "已进入自动模式：请切到题目界面后点击悬浮球，将自动截图并分析", android.widget.Toast.LENGTH_SHORT).show()
+                moveTaskToBack(true)
+            }
             setResult(Activity.RESULT_OK)
         } else {
             setResult(Activity.RESULT_CANCELED)
@@ -54,6 +59,11 @@ class ShizukuPermissionActivity : ComponentActivity() {
                         putExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE, launchMode.name)
                     }
                 )
+                // 自动模式：授权完成后自动退到后台，避免停留本 App 导致后续截图截到本 App 界面。
+                if (launchMode == OverlayLaunchMode.AUTO) {
+                    android.widget.Toast.makeText(this, "已进入自动模式：请切到题目界面后点击悬浮球，将自动截图并分析", android.widget.Toast.LENGTH_SHORT).show()
+                    moveTaskToBack(true)
+                }
                 setResult(Activity.RESULT_OK)
                 finish()
             }

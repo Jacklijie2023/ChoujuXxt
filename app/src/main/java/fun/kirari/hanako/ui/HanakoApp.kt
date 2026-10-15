@@ -1,5 +1,6 @@
 package `fun`.kirari.hanako.ui
 
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -842,6 +843,9 @@ private fun HanakoHomeScreen(
                                 putExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE, OverlayLaunchMode.AUTO.name)
                             }
                         )
+                        // 已进入自动模式：提示用户并自动退到后台，便于直接切换到题目所在应用后点击悬浮球。
+                        Toast.makeText(context, "已进入自动模式：请切到题目界面后点击悬浮球，将自动截图并分析", Toast.LENGTH_SHORT).show()
+                        (context as? Activity)?.moveTaskToBack(true)
                         return@HeroSection
                     }
                     when (
@@ -851,7 +855,10 @@ private fun HanakoHomeScreen(
                             launchMode = OverlayLaunchMode.AUTO
                         )
                     ) {
-                        ScreenCaptureStartResult.Started -> Unit
+                        ScreenCaptureStartResult.Started -> {
+                            Toast.makeText(context, "已进入自动模式：请切到题目界面后点击悬浮球，将自动截图并分析", Toast.LENGTH_SHORT).show()
+                            (context as? Activity)?.moveTaskToBack(true)
+                        }
                         is ScreenCaptureStartResult.UserActionRequired -> {
                             Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
                         }
