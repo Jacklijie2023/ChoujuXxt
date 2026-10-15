@@ -52,9 +52,10 @@ internal class OpenAiChatAdapter(
                 })
             })
             request.tools?.let { put("tools", ToolRegistry.formatForProvider(it, request.provider.kind)) }
-            // 思考模式：OpenAI o 系列官方字段 reasoning_effort（仅对支持该字段的模型生效）。
-            // 第三方中转站的兼容性未验证，开启后若无效果或报错需向用户如实说明。
-            if (request.thinking) {
+            // 思考模式：OpenAI 官方仅 o 系列推理模型支持 reasoning_effort。
+            // 对非 o 系列模型（如 gpt-4o）注入该字段可能被部分中转站以 403 拒绝，
+            // 故仅在模型名为 o 系列（o1/o3/o4/o5）时注入；其余情形跳过该字段。
+            if (request.thinking && isOpenAiReasoningModel(request.model)) {
                 put("reasoning_effort", "high")
             }
         }
@@ -107,4 +108,13 @@ internal class OpenAiChatAdapter(
 
         awaitClose()
     }
+}
+
+/**
+ * 判断模型是否为 OpenAI o 系列推理模型（官方唯一支持 reasoning_effort 的模型线）。
+ * 匹配 o1/o3/o4/o5 前缀；gpt-4o 等非推理模型不在其列。
+ */
+private fun isOpenAiReasoningModel(model: String): Boolean {
+    val m = model.trim().lowercase()
+    return m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4") || m.startsWith("o5") || m == "o"
 }

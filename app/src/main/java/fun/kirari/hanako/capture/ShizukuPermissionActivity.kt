@@ -5,7 +5,6 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
-import androidx.core.content.ContextCompat
 import `fun`.kirari.hanako.overlay.OverlayLaunchMode
 import `fun`.kirari.hanako.overlay.OverlayService
 import rikka.shizuku.Shizuku
@@ -16,9 +15,9 @@ class ShizukuPermissionActivity : ComponentActivity() {
         val granted = grantResult == android.content.pm.PackageManager.PERMISSION_GRANTED
         ShizukuAuthorizationManager.setAuthorized(granted)
         if (granted) {
-            // OverlayService 声明了 foregroundServiceType，须用 startForegroundService 启动。
-            ContextCompat.startForegroundService(
-                this,
+            // OverlayService 在 onCreate 中已调用 startForeground，且本调用来自前台 Activity，
+            // 使用 startService 即可（startForegroundService 会导致回调时序变化，非必要）。
+            startService(
                 Intent(this, OverlayService::class.java).apply {
                     putExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE, launchMode.name)
                 }
@@ -48,9 +47,9 @@ class ShizukuPermissionActivity : ComponentActivity() {
         when {
             Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED -> {
                 ShizukuAuthorizationManager.setAuthorized(true)
-                // OverlayService 声明了 foregroundServiceType，须用 startForegroundService 启动。
-                ContextCompat.startForegroundService(
-                    this,
+                // OverlayService 在 onCreate 中已调用 startForeground，且本调用来自前台 Activity，
+                // 使用 startService 即可（startForegroundService 会导致回调时序变化，非必要）。
+                startService(
                     Intent(this, OverlayService::class.java).apply {
                         putExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE, launchMode.name)
                     }

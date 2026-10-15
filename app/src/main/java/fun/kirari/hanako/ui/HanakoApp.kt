@@ -86,6 +86,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import android.widget.Toast
 import `fun`.kirari.hanako.BuildConfig
+import `fun`.kirari.hanako.capture.ProjectionPermissionActivity
 import `fun`.kirari.hanako.capture.ScreenCaptureManager
 import `fun`.kirari.hanako.capture.ScreenCaptureStartResult
 import `fun`.kirari.hanako.copyToClipboardWithToast
@@ -832,11 +833,16 @@ private fun HanakoHomeScreen(
                 onToggleOverlay = onToggleOverlay,
                 onStartAutoMode = {
                     if (!hasOverlayPermission) return@HeroSection
-                    // 悬浮球若正在运行（普通模式），先停止旧会话，再以自动模式全新启动，
-                    // 避免「长按启动进入自动模式」被运行状态静默阻断。
+                    // 悬浮球已在运行：不停止、不重新申请投屏授权，直接把 AUTO 启动指令发给
+                    // 现有 OverlayService（onStartCommand 会解析 EXTRA_LAUNCH_MODE 并切到自动模式），
+                    // 避免「stopService 后再重启」的竞态导致 launchMode 丢失或截图会话中断。
                     if (overlayEnabled) {
-                        context.stopService(Intent(context, OverlayService::class.java))
-                        ScreenCaptureManager.stop(context, settings.screenCaptureMethod)
+                        context.startService(
+                            Intent(context, OverlayService::class.java).apply {
+                                putExtra(ProjectionPermissionActivity.EXTRA_LAUNCH_MODE, OverlayLaunchMode.AUTO.name)
+                            }
+                        )
+                        return@HeroSection
                     }
                     when (
                         val result = ScreenCaptureManager.requestStart(

@@ -43,10 +43,9 @@ class ProjectionPermissionActivity : ComponentActivity() {
                             putExtra(MediaProjectionForegroundService.EXTRA_RESULT_DATA, result.data)
                         }
                     )
-                    // OverlayService 声明了 foregroundServiceType，须用 startForegroundService 启动，
-                    // 避免 Android 12+ 因普通 startService 启动前台服务而静默失败。
-                    ContextCompat.startForegroundService(
-                        this,
+                    // OverlayService 在 onCreate 中已调用 startForeground，且本调用来自前台 Activity，
+                    // 使用 startService 即可（startForegroundService 会导致回调时序变化，非必要）。
+                    startService(
                         Intent(this, OverlayService::class.java).apply {
                             putExtra(EXTRA_LAUNCH_MODE, launchMode.name)
                         }
