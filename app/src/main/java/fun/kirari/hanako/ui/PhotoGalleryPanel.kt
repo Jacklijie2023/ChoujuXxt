@@ -773,11 +773,6 @@ internal fun AlbumPickerOverlay(
     )
     fun maxDragPx(): Float = surfaceHeightPx.takeIf { it > 0 }?.toFloat() ?: (closeThresholdPx * 2f)
 
-    fun moveSheet(dy: Float) {
-        if (closeTriggered) return
-        dragOffsetY = (dragOffsetY + dy).coerceIn(0f, maxDragPx())
-    }
-
     fun settleSheet() {
         if (closeTriggered) return
         if (dragOffsetY >= closeThresholdPx) {
@@ -823,22 +818,42 @@ internal fun AlbumPickerOverlay(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    // 顶部栏 / 功能行 / 底部提示等非网格区域：按住向下拖动，页面跟随手指位移。
+                    // 全页统一下拉交互：在 Initial 阶段旁路观察，不消费普通滚动事件，网格可正常上下滚动。
+                    // 仅当网格位于顶部且手指向下移动时，才识别为「下拉收起」手势并消费位移。
+                    // 位移按「手指相对按下点的累计位移 + 当前页面位移」计算，抵消页面位移带来的坐标漂移，
+                    // 消除拖动反馈回路导致的抖动，保证页面 1:1 跟随手指。
                     .pointerInput(Unit) {
-                        detectVerticalDragGestures(
-                            onDragStart = { dragging = true },
-                            onDragCancel = {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val down = awaitFirstDown(
+                                    requireUnconsumed = false,
+                                    pass = PointerEventPass.Initial
+                                )
+                                val downY = down.position.y
+                                var pulling = false
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val change = event.changes
+                                        .firstOrNull { it.id == down.id } ?: break
+                                    if (!change.pressed) break
+                                    val gridAtTop = gridState.firstVisibleItemIndex == 0 &&
+                                        gridState.firstVisibleItemScrollOffset == 0
+                                    val fingerDelta = change.position.y - downY
+                                    if (!pulling) {
+                                        // 关闭动画期间不再响应下拉，避免把正在滑出的页面拉回来。
+                                        pulling = !closeTriggered && gridAtTop && fingerDelta > 0
+                                        if (pulling) dragging = true
+                                    }
+                                    if (pulling) {
+                                        dragOffsetY = (dragOffsetY + fingerDelta)
+                                            .coerceIn(0f, maxDragPx())
+                                        change.consume()
+                                    }
+                                }
                                 dragging = false
-                                settleSheet()
-                            },
-                            onDragEnd = {
-                                dragging = false
-                                settleSheet()
-                            },
-                            onVerticalDrag = { _, dragAmount ->
-                                moveSheet(dragAmount)
+                                if (pulling) settleSheet()
                             }
-                        )
+                        }
                     }
             ) {
                 // 顶部栏：左上角 × 关闭 + 居中可点击标题（切换相册分类）。
@@ -961,42 +976,6 @@ internal fun AlbumPickerOverlay(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
-                            // 网格区域（占页面大部分）：在 Initial 阶段旁路观察拖动，
-                            // 不消费普通滚动事件，网格滚动不受影响；仅当拖动开始时就位于顶部且首帧向下移动，
-                            // 才识别为「下拉收起」手势并消费位移，避免滚动到顶部边界的瞬间误触发页面位移导致抖动。
-                            .pointerInput(gridState) {
-                                awaitPointerEventScope {
-                                    while (true) {
-                                        val down = awaitFirstDown(
-                                            requireUnconsumed = false,
-                                            pass = PointerEventPass.Initial
-                                        )
-                                        var lastY = down.position.y
-                                        var pulling = false
-                                        while (true) {
-                                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                                            val change = event.changes
-                                                .firstOrNull { it.id == down.id } ?: break
-                                            if (!change.pressed) break
-                                            val atTop = gridState.firstVisibleItemIndex == 0 &&
-                                                gridState.firstVisibleItemScrollOffset == 0
-                                            val dy = change.position.y - lastY
-                                            lastY = change.position.y
-                                            if (!pulling) {
-                                                pulling = atTop && dy > 0
-                                                if (pulling) dragging = true
-                                            }
-                                            if (pulling) {
-                                                // 跟随手指上下位移；消费本次位移，阻止网格同时滚动/拉伸，保证页面 1:1 跟随手指。
-                                                moveSheet(dy)
-                                                change.consume()
-                                            }
-                                        }
-                                        dragging = false
-                                        if (pulling) settleSheet()
-                                    }
-                                }
-                            }
                     ) {
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(4),
