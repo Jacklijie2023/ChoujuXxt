@@ -10,6 +10,9 @@ import android.os.Build
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -59,6 +62,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,10 +70,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -77,6 +83,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** 手机相册照片条目。 */
@@ -746,9 +754,45 @@ internal fun AlbumPickerOverlay(
     }
 
     val gridState = rememberLazyGridState()
-    // 按住页面（照片网格以外区域）向下拖动收起页面的累计位移与阈值。
-    val dismissThresholdPx = with(LocalDensity.current) { 64.dp.toPx() }
-    var collapseAccum by remember { mutableStateOf(0f) }
+    // 下拉收起交互：页面跟随手指向下位移（收缩），松手时若超过阈值则动画滑出关闭，否则回弹。
+    val density = LocalDensity.current
+    val closeThresholdPx = with(density) { 64.dp.toPx() }
+    var surfaceHeightPx by remember { mutableStateOf(0) }
+    var dragOffsetY by remember { mutableStateOf(0f) }
+    var dragging by remember { mutableStateOf(false) }
+    var closeTriggered by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    // 拖动时瞬时跟随手指，松手后以 220ms 缓动吸附（回弹或滑出关闭）。
+    val sheetOffsetY by animateFloatAsState(
+        targetValue = dragOffsetY,
+        animationSpec = tween(
+            durationMillis = if (dragging) 0 else 220,
+            easing = FastOutSlowInEasing
+        ),
+        label = "albumSheetOffsetY"
+    )
+    fun maxDragPx(): Float = surfaceHeightPx.takeIf { it > 0 }?.toFloat() ?: (closeThresholdPx * 2f)
+
+    fun moveSheet(dy: Float) {
+        if (closeTriggered) return
+        dragOffsetY = (dragOffsetY + dy).coerceIn(0f, maxDragPx())
+    }
+
+    fun settleSheet() {
+        if (closeTriggered) return
+        if (dragOffsetY >= closeThresholdPx) {
+            // 过阈值：先滑出页面，再真正关闭（动态收缩关闭效果）。
+            closeTriggered = true
+            dragOffsetY = maxDragPx()
+            scope.launch {
+                delay(240)
+                onDismiss()
+            }
+        } else {
+            // 未过阈值：回弹恢复。
+            dragOffsetY = 0f
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // 遮罩：点击关闭相册页。
@@ -768,25 +812,30 @@ internal fun AlbumPickerOverlay(
                 .fillMaxHeight()
                 // 与顶部手机导航栏（状态栏）留出间距。
                 .statusBarsPadding()
-                .padding(top = 12.dp),
+                .padding(top = 12.dp)
+                .onSizeChanged { size -> surfaceHeightPx = size.height }
+                // 下拉时整页跟随手指向下位移（收缩/关闭的动态效果）。
+                .graphicsLayer { translationY = sheetOffsetY },
             shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
             color = MaterialTheme.colorScheme.surface
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    // 顶部栏 / 功能行 / 底部提示等非网格区域：按住向下拖动收起页面。
+                    // 顶部栏 / 功能行 / 底部提示等非网格区域：按住向下拖动，页面跟随手指位移。
                     .pointerInput(Unit) {
                         detectVerticalDragGestures(
-                            onDragStart = { collapseAccum = 0f },
-                            onDragCancel = { collapseAccum = 0f },
-                            onDragEnd = { collapseAccum = 0f },
+                            onDragStart = { dragging = true },
+                            onDragCancel = {
+                                dragging = false
+                                settleSheet()
+                            },
+                            onDragEnd = {
+                                dragging = false
+                                settleSheet()
+                            },
                             onVerticalDrag = { _, dragAmount ->
-                                collapseAccum += dragAmount
-                                if (collapseAccum >= dismissThresholdPx) {
-                                    collapseAccum = 0f
-                                    onDismiss()
-                                }
+                                moveSheet(dragAmount)
                             }
                         )
                     }
@@ -911,8 +960,8 @@ internal fun AlbumPickerOverlay(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
-                            // 网格区域（占页面大部分）：在 Initial 阶段旁路观察向下拖动，
-                            // 不消费事件，网格滚动不受影响；仅当按下时网格位于顶部才触发收起。
+                            // 网格区域（占页面大部分）：在 Initial 阶段旁路观察拖动，
+                            // 不消费事件，网格滚动不受影响；仅当网格位于顶部时让页面跟随手指位移。
                             .pointerInput(gridState) {
                                 awaitPointerEventScope {
                                     while (true) {
@@ -920,23 +969,27 @@ internal fun AlbumPickerOverlay(
                                             requireUnconsumed = false,
                                             pass = PointerEventPass.Initial
                                         )
-                                        val startAtTop = gridState.firstVisibleItemIndex == 0 &&
-                                            gridState.firstVisibleItemScrollOffset == 0
                                         var lastY = down.position.y
-                                        var accum = 0f
-                                        var handled = false
+                                        var movedSheet = false
                                         while (true) {
                                             val event = awaitPointerEvent(PointerEventPass.Initial)
                                             val change = event.changes
                                                 .firstOrNull { it.id == down.id } ?: break
                                             if (!change.pressed) break
-                                            accum += change.position.y - lastY
+                                            val atTop = gridState.firstVisibleItemIndex == 0 &&
+                                                gridState.firstVisibleItemScrollOffset == 0
+                                            val dy = change.position.y - lastY
                                             lastY = change.position.y
-                                            if (!handled && startAtTop && accum >= dismissThresholdPx) {
-                                                handled = true
-                                                onDismiss()
+                                            if (atTop) {
+                                                if (!movedSheet) {
+                                                    movedSheet = true
+                                                    dragging = true
+                                                }
+                                                moveSheet(dy)
                                             }
                                         }
+                                        dragging = false
+                                        if (movedSheet) settleSheet()
                                     }
                                 }
                             }

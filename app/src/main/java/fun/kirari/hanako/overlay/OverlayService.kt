@@ -461,7 +461,10 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                         OverlayPanel(
                             viewModel = overlayViewModel,
                             onDismiss = { overlayViewModel.closeSheet() },
-                            panelHeightPx = panelHeightPx
+                            panelHeightPx = panelHeightPx,
+                            onPanelDragBy = ::dragPanelBy,
+                            onPanelSettle = ::settlePanel,
+                            onPanelFlingDown = { overlayViewModel.closeSheet() }
                         )
                     }
                 }
@@ -499,8 +502,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     }
 
     private fun createPanelHandleView(): FrameLayout {
-        var dragStartRawY = 0f
-        var dragStartHeightPx = 0
+        var lastRawY = 0f
         return FrameLayout(this).apply {
             setBackgroundColor(Color.TRANSPARENT)
             addView(
@@ -522,20 +524,23 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         panelAnimationJob?.cancel()
-                        dragStartRawY = event.rawY
-                        dragStartHeightPx = panelCurrentHeightPx
+                        lastRawY = event.rawY
                         true
                     }
 
                     MotionEvent.ACTION_MOVE -> {
-                        val nextHeight = (dragStartHeightPx - (event.rawY - dragStartRawY))
-                            .roundToInt()
-                        updatePanelHeight(nextHeight)
+                        // 跟随手指实时收缩/展开（增量位移，允许低于停靠高度，便于下拉关闭）。
+                        dragPanelBy(event.rawY - lastRawY)
+                        lastRawY = event.rawY
                         true
                     }
 
                     MotionEvent.ACTION_UP,
-                    MotionEvent.ACTION_CANCEL -> true
+                    MotionEvent.ACTION_CANCEL -> {
+                        // 松手吸附：低于阈值关闭，否则回停靠/全展开。
+                        settlePanel()
+                        true
+                    }
 
                     else -> false
                 }
@@ -543,9 +548,32 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         }
     }
 
-    private fun updatePanelHeight(heightPx: Int) {
-        if (panelDockHeightPx <= 0 || panelHeightPx <= 0) return
-        applyPanelHeight(heightPx.coerceIn(panelDockHeightPx, panelHeightPx))
+    /**
+     * 跟随手指收缩面板高度（内容顶部下拉 / 把手拖拽共用）。
+     *
+     * 与停靠值下限不同，这里允许高度低于停靠值直至 0，
+     * 便于松手后按吸附逻辑决定「回停靠」还是「关闭」。
+     */
+    private fun dragPanelBy(deltaY: Float) {
+        if (panelHeightPx <= 0) return
+        panelAnimationJob?.cancel()
+        val next = panelCurrentHeightPx - deltaY.roundToInt()
+        applyPanelHeight(next.coerceIn(0, panelHeightPx))
+    }
+
+    /**
+     * 松手吸附：高度被拖到低于停靠值 → 关闭面板；中段 → 回停靠高度；上段 → 回目标（全展开）高度。
+     */
+    private fun settlePanel() {
+        val current = panelCurrentHeightPx
+        val dock = panelDockHeightPx
+        val target = panelHeightPx
+        if (target <= 0 || dock <= 0) return
+        when {
+            current < dock -> overlayViewModel.closeSheet()
+            current < (dock + target) / 2 -> if (current != dock) animatePanelHeight(current, dock)
+            else -> if (current != target) animatePanelHeight(current, target)
+        }
     }
 
     private fun applyPanelHeight(heightPx: Int) {

@@ -7,6 +7,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -54,6 +55,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -85,6 +87,9 @@ import `fun`.kirari.hanako.ui.cropBitmap
 import `fun`.kirari.hanako.util.HapticHelper
 import kotlinx.coroutines.delay
 import kotlin.math.abs
+
+/** 内容区顶部向下甩动关闭面板的最小速度（px/s）。 */
+private const val PanelFlingDismissVelocityPx = 700f
 
 @Composable
 internal fun CropOverlaySheet(
@@ -427,7 +432,13 @@ internal fun CropOverlaySheet(
 internal fun ResultOverlaySheet(
     uiState: OverlayUiState,
     onClose: () -> Unit,
-    panelHeightPx: Int
+    panelHeightPx: Int,
+    /** 内容滚动到顶部后继续下拉时，跟随手指收缩面板。 */
+    onPanelDragBy: (Float) -> Unit = {},
+    /** 松手吸附：低于阈值关闭，否则回停靠/全展开。 */
+    onPanelSettle: () -> Unit = {},
+    /** 顶部向下快速甩动（fling）：直接关闭面板。 */
+    onPanelFlingDown: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -454,6 +465,45 @@ internal fun ResultOverlaySheet(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    // 内容顶部下拉 → 跟随收缩面板；松手 → 吸附（关闭/回停靠/回全展开）；快速下滑 → 关闭。
+                    .pointerInput(scrollState) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val down = awaitFirstDown(
+                                    requireUnconsumed = false,
+                                    pass = PointerEventPass.Initial
+                                )
+                                var lastY = down.position.y
+                                var lastTime = down.uptimeMillis
+                                var shrankSheet = false
+                                var maxDownVelocity = 0f
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val change = event.changes
+                                        .firstOrNull { it.id == down.id } ?: break
+                                    if (!change.pressed) break
+                                    val dy = change.position.y - lastY
+                                    val now = change.uptimeMillis
+                                    val dt = now - lastTime
+                                    lastY = change.position.y
+                                    lastTime = now
+                                    if (dt > 0) {
+                                        val v = dy / dt * 1000f
+                                        if (v > maxDownVelocity) maxDownVelocity = v
+                                    }
+                                    // 仅当内容滚动到顶部（无内容可滚动）且手指向下时，让面板跟随收缩。
+                                    if (scrollState.value <= 0 && dy > 0) {
+                                        shrankSheet = true
+                                        onPanelDragBy(dy)
+                                    }
+                                }
+                                when {
+                                    maxDownVelocity > PanelFlingDismissVelocityPx -> onPanelFlingDown()
+                                    shrankSheet -> onPanelSettle()
+                                }
+                            }
+                        }
+                    }
             ) {
                 SheetTitleRow(
                     title = {
