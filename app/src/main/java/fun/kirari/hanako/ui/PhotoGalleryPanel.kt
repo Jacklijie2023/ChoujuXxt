@@ -756,7 +756,6 @@ internal fun AlbumPickerOverlay(
     val gridState = rememberLazyGridState()
     // 下拉收起交互：页面跟随手指向下位移（收缩），松手时若超过阈值则动画滑出关闭，否则回弹。
     val density = LocalDensity.current
-    val closeThresholdPx = with(density) { 64.dp.toPx() }
     var surfaceHeightPx by remember { mutableStateOf(0) }
     var dragOffsetY by remember { mutableStateOf(0f) }
     var dragging by remember { mutableStateOf(false) }
@@ -771,11 +770,14 @@ internal fun AlbumPickerOverlay(
         ),
         label = "albumSheetOffsetY"
     )
-    fun maxDragPx(): Float = surfaceHeightPx.takeIf { it > 0 }?.toFloat() ?: (closeThresholdPx * 2f)
+    // 页面可下拉的最大位移：整页高度（完全滑出后关闭）。
+    fun maxDragPx(): Float = surfaceHeightPx.takeIf { it > 0 }?.toFloat() ?: (with(density) { 128.dp.toPx() })
+    // 关闭阈值：下拉超过页面高度约 2/3 才自动隐藏，否则回弹。
+    fun closeThresholdPx(): Float = maxDragPx() * 2f / 3f
 
     fun settleSheet() {
         if (closeTriggered) return
-        if (dragOffsetY >= closeThresholdPx) {
+        if (dragOffsetY >= closeThresholdPx()) {
             // 过阈值：先滑出页面，再真正关闭（动态收缩关闭效果）。
             closeTriggered = true
             dragOffsetY = maxDragPx()
