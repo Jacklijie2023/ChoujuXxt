@@ -815,7 +815,8 @@ internal fun AlbumPickerOverlay(
                 .padding(top = 12.dp)
                 .onSizeChanged { size -> surfaceHeightPx = size.height }
                 // 下拉时整页跟随手指向下位移（收缩/关闭的动态效果）。
-                .graphicsLayer { translationY = sheetOffsetY },
+                // 拖动过程中直接用原始 dragOffsetY 驱动位移，绕过动画的一帧延迟，避免抖动；仅松手后走动画吸附。
+                .graphicsLayer { translationY = if (dragging) dragOffsetY else sheetOffsetY },
             shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
             color = MaterialTheme.colorScheme.surface
         ) {
@@ -961,7 +962,8 @@ internal fun AlbumPickerOverlay(
                             .weight(1f)
                             .fillMaxWidth()
                             // 网格区域（占页面大部分）：在 Initial 阶段旁路观察拖动，
-                            // 不消费事件，网格滚动不受影响；仅当网格位于顶部时让页面跟随手指位移。
+                            // 不消费普通滚动事件，网格滚动不受影响；仅当拖动开始时就位于顶部且首帧向下移动，
+                            // 才识别为「下拉收起」手势并消费位移，避免滚动到顶部边界的瞬间误触发页面位移导致抖动。
                             .pointerInput(gridState) {
                                 awaitPointerEventScope {
                                     while (true) {
@@ -970,7 +972,7 @@ internal fun AlbumPickerOverlay(
                                             pass = PointerEventPass.Initial
                                         )
                                         var lastY = down.position.y
-                                        var movedSheet = false
+                                        var pulling = false
                                         while (true) {
                                             val event = awaitPointerEvent(PointerEventPass.Initial)
                                             val change = event.changes
@@ -980,16 +982,18 @@ internal fun AlbumPickerOverlay(
                                                 gridState.firstVisibleItemScrollOffset == 0
                                             val dy = change.position.y - lastY
                                             lastY = change.position.y
-                                            if (atTop) {
-                                                if (!movedSheet) {
-                                                    movedSheet = true
-                                                    dragging = true
-                                                }
+                                            if (!pulling) {
+                                                pulling = atTop && dy > 0
+                                                if (pulling) dragging = true
+                                            }
+                                            if (pulling) {
+                                                // 跟随手指上下位移；消费本次位移，阻止网格同时滚动/拉伸，保证页面 1:1 跟随手指。
                                                 moveSheet(dy)
+                                                change.consume()
                                             }
                                         }
                                         dragging = false
-                                        if (movedSheet) settleSheet()
+                                        if (pulling) settleSheet()
                                     }
                                 }
                             }

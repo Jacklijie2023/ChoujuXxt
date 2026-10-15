@@ -465,7 +465,9 @@ internal fun ResultOverlaySheet(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                    // 内容顶部下拉 → 跟随收缩面板；松手 → 吸附（关闭/回停靠/回全展开）；快速下滑 → 关闭。
+                    // 内容顶部下拉 → 跟随手指收缩面板；上滑 → 展开恢复；松手 → 吸附（关闭/回停靠/回全展开）；快速下滑 → 关闭。
+                    // 采用与相册页一致的 Initial 阶段旁路观察：普通滚动事件不消费，内容可正常上下滚动；
+                    // 仅当拖动开始时就位于顶部且首帧向下移动，才识别为「下拉跟随」手势并消费位移，保证面板 1:1 跟随手指。
                     .pointerInput(scrollState) {
                         awaitPointerEventScope {
                             while (true) {
@@ -475,13 +477,14 @@ internal fun ResultOverlaySheet(
                                 )
                                 var lastY = down.position.y
                                 var lastTime = down.uptimeMillis
-                                var shrankSheet = false
+                                var pulling = false
                                 var maxDownVelocity = 0f
                                 while (true) {
                                     val event = awaitPointerEvent(PointerEventPass.Initial)
                                     val change = event.changes
                                         .firstOrNull { it.id == down.id } ?: break
                                     if (!change.pressed) break
+                                    val atTop = scrollState.value <= 0
                                     val dy = change.position.y - lastY
                                     val now = change.uptimeMillis
                                     val dt = now - lastTime
@@ -491,15 +494,21 @@ internal fun ResultOverlaySheet(
                                         val v = dy / dt * 1000f
                                         if (v > maxDownVelocity) maxDownVelocity = v
                                     }
-                                    // 仅当内容滚动到顶部（无内容可滚动）且手指向下时，让面板跟随收缩。
-                                    if (scrollState.value <= 0 && dy > 0) {
-                                        shrankSheet = true
+                                    if (!pulling) {
+                                        // 仅当拖动开始时就位于顶部、且首帧向下移动，才识别为「下拉跟随」手势，
+                                        // 避免内容滚动过程中（到达顶部边界的瞬间）误触发面板位移。
+                                        pulling = atTop && dy > 0
+                                    }
+                                    if (pulling) {
+                                        // 下拉收缩、上滑展开：跟随手指上下移动；消费本次位移，
+                                        // 阻止子级内容在面板手势期间同步滚动，保证面板 1:1 跟随手指。
                                         onPanelDragBy(dy)
+                                        change.consume()
                                     }
                                 }
                                 when {
-                                    maxDownVelocity > PanelFlingDismissVelocityPx -> onPanelFlingDown()
-                                    shrankSheet -> onPanelSettle()
+                                    pulling && maxDownVelocity > PanelFlingDismissVelocityPx -> onPanelFlingDown()
+                                    pulling -> onPanelSettle()
                                 }
                             }
                         }
