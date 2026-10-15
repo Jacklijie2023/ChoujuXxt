@@ -856,8 +856,9 @@ private fun HanakoHomeScreen(
                         )
                     ) {
                         ScreenCaptureStartResult.Started -> {
-                            Toast.makeText(context, "已进入自动模式：请切到题目界面后点击悬浮球，将自动截图并分析", Toast.LENGTH_SHORT).show()
-                            (context as? Activity)?.moveTaskToBack(true)
+                            // Started 仅表示授权页已启动（投屏授权/Shizuku 授权），服务尚未运行，
+                            // 此时不能退后台，否则可能干扰授权弹窗展示；授权完成后由授权页负责退后台。
+                            Toast.makeText(context, "请在弹窗中允许屏幕捕捉，即可进入自动模式", Toast.LENGTH_SHORT).show()
                         }
                         is ScreenCaptureStartResult.UserActionRequired -> {
                             Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()

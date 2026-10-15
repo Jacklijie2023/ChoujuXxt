@@ -453,6 +453,10 @@ internal class OverlayViewModel(
             is BubbleState.Copied -> {
                 // 已复制状态下，单击重置
                 bubbleStateMachine.dispatch(BubbleEvent.SingleTap)
+                // 自动模式下，重置后立即进入新一轮分析：避免完成态残留导致单击只重置不分析、表现为“点击悬浮球无自动截图/分析”
+                if (launchMode == OverlayLaunchMode.AUTO) {
+                    openCropSheet()
+                }
             }
             else -> {
                 // 其他状态（Idle、ShowingLetters、Processing 等），打开裁剪页面
