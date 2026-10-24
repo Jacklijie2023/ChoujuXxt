@@ -16,6 +16,8 @@ import `fun`.kirari.hanako.data.ProcessingResult
 import `fun`.kirari.hanako.data.ProcessingRoute
 import `fun`.kirari.hanako.data.ProviderPreset
 import `fun`.kirari.hanako.data.ScreenCaptureMethod
+import `fun`.kirari.hanako.data.ThemeColorStyle
+import `fun`.kirari.hanako.data.ThemeMode
 import `fun`.kirari.hanako.data.createProvider
 import `fun`.kirari.hanako.data.SettingsRepository
 import `fun`.kirari.hanako.data.defaultAssistant
@@ -27,6 +29,7 @@ import `fun`.kirari.hanako.data.modelSelectionFor
 import `fun`.kirari.hanako.localocr.LocalOcrManager
 import `fun`.kirari.hanako.network.ConnectionTestResult
 import `fun`.kirari.hanako.network.ProviderModelsApi
+import `fun`.kirari.hanako.screencontext.TargetAppMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -58,6 +61,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 聊天模型全量列表内存缓存（聊天页与迷你窗共用同一实例）。 */
     internal val chatModelCatalog: ChatModelCatalog = container.chatModelCatalog
+
+    /** 目标应用绑定模式（R7），供设置页只读展示。 */
+    val targetAppMode: StateFlow<TargetAppMode> = container.targetAppMode
+
+    /** 已建立绑定的目标应用包名（未绑定为 null），供设置页只读展示。 */
+    val boundTargetPackage: StateFlow<String?> = container.boundTargetPackage
 
     /**
      * 「打开聊天页」请求信号。
@@ -190,7 +199,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setRoute(route: ProcessingRoute) {
         viewModelScope.launch {
-            repository.update { it.copy(processingRoute = route) }
+            repository.update(homeModeTransform(route))
+        }
+    }
+
+    /**
+     * 首页工作模式选择：`null` 表示「实时互动」（开启实时模式，保留原处理路线不覆盖），
+     * 否则关闭实时模式并保存对应处理路线。
+     */
+    fun selectHomeMode(route: ProcessingRoute?) {
+        viewModelScope.launch {
+            repository.update(homeModeTransform(route))
         }
     }
 
@@ -250,6 +269,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.update { it.copy(trustAllHttpsCertificates = enabled) }
         }
     }
+
+    /** 设置悬浮球自定义图标文件路径（null 恢复默认图标）。 */
+    fun setFloatingBallCustomIcon(path: String?) {
+        viewModelScope.launch {
+            repository.update { it.copy(floatingBall = it.floatingBall.copy(customIconPath = path)) }
+        }
+    }
+
+    /** 设置迷你聊天窗透明度（0.3~1.0）。 */
+    fun setMiniChatAlpha(alpha: Float) {
+        viewModelScope.launch {
+            repository.update {
+                it.copy(miniChat = it.miniChat.copy(backgroundAlpha = alpha.coerceIn(0.3f, 1f)))
+            }
+        }
+    }
+
+    /** 设置朗读语音名称（null 跟随系统默认）；调用方需同步 TtsHelper.setVoice。 */
+    fun setTtsVoiceName(name: String?) {
+        viewModelScope.launch {
+            repository.update { it.copy(ttsVoiceName = name) }
+        }
+    }
+
+    /** 设置界面亮暗模式（跟随系统 / 白天 / 黑夜）。 */
+    fun setThemeMode(mode: ThemeMode) {
+        viewModelScope.launch {
+            repository.update { it.copy(themeMode = mode) }
+        }
+    }
+
+    /** 设置界面配色风格（默认 / 粉黛 / 森林 / 星空）。 */
+    fun setColorStyle(style: ThemeColorStyle) {
+        viewModelScope.launch {
+            repository.update { it.copy(colorStyle = style) }
+        }
+    }
+
+    /** 开关实时屏幕感知（开启后无障碍持续更新当前屏幕上下文）。 */
+    fun setRealTimeMode(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.update { it.copy(realTimeMode = enabled) }
+        }
+    }
+
+    /**
+     * 设置目标刷题应用包名（null / 空白表示取消选择）。
+     *
+     * 只有该应用才允许建立或更新题目上下文；未选择时实时感知不会采集任何题目内容。
+     */
+    fun setTargetAppPackage(packageName: String?) {
+        viewModelScope.launch {
+            repository.update { it.copy(targetAppPackage = packageName?.trim()?.ifBlank { null }) }
+        }
+    }
+
+    /** 设置目标应用绑定模式（R7）：AUTO / RESTRICTED。 */
+    fun setTargetAppMode(mode: TargetAppMode) {
+        viewModelScope.launch {
+            repository.update { it.copy(targetAppMode = mode) }
+        }
+    }
+
+    /** 按实时前台应用重新建立会话绑定（设置页「重新绑定到当前前台应用」按钮）。 */
+    fun bindTargetToForegroundNow(): String? = container.bindTargetFromLiveForeground()
+
+    /** 按手动选择的目标应用重新建立会话绑定（RESTRICTED 模式下更有意义）。 */
+    fun rebindTargetNow(): String? =
+        settings.value.targetAppPackage?.let { container.rebindTarget(it) }
 
     fun clearHistory() {
         viewModelScope.launch {
@@ -319,4 +407,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             else -> selection.copy(providerId = null, model = "")
         }
     }
+}
+
+/**
+ * 首页工作模式选择的纯逻辑（便于单元测试）。
+ *
+ * `route == null` 表示「实时互动」：开启实时模式并保留原处理路线；
+ * 否则关闭实时模式并写入对应处理路线，即实时互动与其他三种路线互斥。
+ */
+internal fun homeModeTransform(route: ProcessingRoute?): (AppSettings) -> AppSettings = { current ->
+    if (route == null) current.copy(realTimeMode = true)
+    else current.copy(realTimeMode = false, processingRoute = route)
 }

@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 供 FileProvider 放行的缓存子目录：
+     shared_images/ 用于相册分享的图片；
+     exports/        用于历史记录与诊断日志导出的 .json/.csv/.txt 文件。 -->
 <paths>
     <cache-path
         name="shared_images"
         path="shared_images/" />
+    <cache-path
+        name="exports"
+        path="exports/" />
 </paths>

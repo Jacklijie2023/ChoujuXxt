@@ -1,19 +1,13 @@
 package `fun`.kirari.hanako.network
 
-import `fun`.kirari.hanako.debug.AppDebugLogStore
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 
 internal class OpenAiChatAdapter(
@@ -23,49 +17,16 @@ internal class OpenAiChatAdapter(
     private val mediaType = "application/json; charset=utf-8".toMediaType()
 
     override suspend fun stream(request: StreamRequest): Flow<LlmEvent> = callbackFlow {
-        val payload = buildJsonObject {
-            put("model", request.model)
-            put("stream", true)
-            put("messages", buildJsonArray {
-                add(openAiMessage("system", request.systemPrompt))
-                add(buildJsonObject {
-                    put("role", "user")
-                    if (!request.hasImages) {
-                        put("content", request.userPrompt)
-                    } else {
-                        put("content", buildJsonArray {
-                            add(buildJsonObject {
-                                put("type", "text")
-                                put("text", request.userPrompt)
-                            })
-                            request.imagesBase64.forEach { imageBase64 ->
-                                add(buildJsonObject {
-                                    put("type", "image_url")
-                                    put("image_url", buildJsonObject {
-                                        put("url", "data:image/jpeg;base64,$imageBase64")
-                                        put("detail", "high")
-                                    })
-                                })
-                            }
-                        })
-                    }
-                })
-            })
-            request.tools?.let { put("tools", ToolRegistry.formatForProvider(it, request.provider.kind)) }
-            // 思考模式：OpenAI 官方仅 o 系列推理模型支持 reasoning_effort。
-            // 对非 o 系列模型（如 gpt-4o）注入该字段可能被部分中转站以 403 拒绝，
-            // 故仅在模型名为 o 系列（o1/o3/o4/o5）时注入；其余情形跳过该字段。
-            if (request.thinking && isOpenAiReasoningModel(request.model)) {
-                put("reasoning_effort", "high")
-            }
-        }
+        val payload = buildOpenAiChatPayload(request)
 
         val toolCalls = mutableMapOf<Int, PendingToolCall>()
 
         sseClient.stream(
             request = baseRequest(request.provider, "${request.provider.baseUrl.trimEnd('/')}/chat/completions", payload, json, mediaType),
+            traceId = request.traceId,
             firstDeltaTimeoutMillis = request.firstDeltaTimeoutMillis,
             onEvent = { _, _, _, data ->
+                request.diagnostics.markEvent(System.nanoTime())
                 if (data == "[DONE]") {
                     SseStreamClient.StreamEventResult(done = true)
                 } else {
@@ -76,8 +37,16 @@ internal class OpenAiChatAdapter(
                     val delta = choice["delta"]?.jsonObject ?: return@stream null
 
                     val textDelta = extractOpenAiContent(delta["content"])
+                    // 推理增量（reasoning_content）：不得伪装成最终正文，既不产生 TextDelta，
+                    // 也回填到诊断采集器（供耗时摘要与「仅推理、无正文」判定）；
+                    // 同时计入「服务端已开始输出」，避免仅推理的流被首字定时器误判超时。
+                    val reasoningDelta = delta["reasoning_content"]?.jsonPrimitive?.contentOrNull.orEmpty()
+
                     if (textDelta.isNotBlank()) {
                         trySend(LlmEvent.TextDelta(textDelta))
+                    }
+                    if (reasoningDelta.isNotBlank()) {
+                        request.diagnostics.markReasoning(System.nanoTime())
                     }
 
                     (delta["tool_calls"] as? JsonArray)?.forEach { item ->
@@ -91,7 +60,10 @@ internal class OpenAiChatAdapter(
                         tc.arguments.append(function["arguments"]?.jsonPrimitive?.contentOrNull.orEmpty())
                     }
 
-                    SseStreamClient.StreamEventResult(delta = textDelta.ifBlank { null })
+                    SseStreamClient.StreamEventResult(
+                        delta = textDelta.ifBlank { null },
+                        received = textDelta.isNotBlank() || reasoningDelta.isNotBlank()
+                    )
                 }
             },
             onDelta = {}
@@ -108,13 +80,4 @@ internal class OpenAiChatAdapter(
 
         awaitClose()
     }
-}
-
-/**
- * 判断模型是否为 OpenAI o 系列推理模型（官方唯一支持 reasoning_effort 的模型线）。
- * 匹配 o1/o3/o4/o5 前缀；gpt-4o 等非推理模型不在其列。
- */
-private fun isOpenAiReasoningModel(model: String): Boolean {
-    val m = model.trim().lowercase()
-    return m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4") || m.startsWith("o5") || m == "o"
 }

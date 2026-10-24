@@ -24,6 +24,7 @@ import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import `fun`.kirari.hanako.MainActivity
 import `fun`.kirari.hanako.R
+import `fun`.kirari.hanako.debug.AppDebugLogStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.nio.ByteBuffer
@@ -97,6 +98,9 @@ class MediaProjectionForegroundService : Service() {
 }
 
 object ProjectionSessionManager {
+    /** 沿用实时屏幕感知标签，便于与 ScreenCtx / ChatTrace 同一请求窗口对齐。 */
+    private const val logTag = "ScreenCtx"
+
     private val _sessionActive = MutableStateFlow(false)
     val sessionActive: StateFlow<Boolean> = _sessionActive
     @Volatile
@@ -111,6 +115,18 @@ object ProjectionSessionManager {
     private var width: Int = 0
     @Volatile
     private var height: Int = 0
+
+    /**
+     * 本进程内是否**曾经**成功建立过截图会话。
+     *
+     * 用于区分「从未建立会话（尚未授权）」与「建立过但运行期丢失」：
+     * `stop()` 只关会话、不清零该标记，使它表达「曾经可用过」这一事实。
+     */
+    @Volatile
+    private var everEstablished = false
+
+    /** 本进程内截图会话是否曾成功建立（见 [everEstablished]）。 */
+    fun hasEverEstablished(): Boolean = everEstablished
 
     fun startSession(context: Context, resultCode: Int, data: Intent) {
         stop()
@@ -148,6 +164,7 @@ object ProjectionSessionManager {
         imageReader = localReader
         virtualDisplay = localDisplay
         callback = localCallback
+        everEstablished = true
         _sessionActive.value = true
     }
 
@@ -155,9 +172,57 @@ object ProjectionSessionManager {
         return mediaProjection != null && imageReader != null && virtualDisplay != null
     }
 
-    fun captureLatestBitmap(): Bitmap {
+    /**
+     * 取得当前屏幕的一帧。
+     *
+     * [minFrameTimestampNanos] 非空时表示「Hanako 窗口已在该时刻完成隐藏」，
+     * 只接受时间戳不早于该时刻的帧：`ImageReader` 中可能仍缓存着隐藏前产出的旧帧，
+     * 直接 `acquireLatestImage()` 会把它当成当前屏幕交给 OCR。
+     * 等待有上限，超时即报明确失败，不把不可验证的旧帧标记为成功。
+     */
+    suspend fun captureLatestBitmap(minFrameTimestampNanos: Long? = null): Bitmap {
         val reader = imageReader ?: error("屏幕捕捉会话未初始化")
-        val image = waitForImage(reader) ?: error("未获取到屏幕内容")
+        val startedAtNanos = System.nanoTime()
+        var discardedCount = 0
+        val image = acquireFreshFrame(
+            minFrameTimestampNanos = minFrameTimestampNanos,
+            acquire = { reader.acquireLatestImage() },
+            frameTimestampOf = { it.timestamp },
+            release = { it.close() },
+            onDiscardedFrame = { staleTimestamp ->
+                discardedCount += 1
+                AppDebugLogStore.i(
+                    logTag,
+                    "frame-stale-discarded minTs=$minFrameTimestampNanos ts=$staleTimestamp " +
+                        "staleMillis=${(minFrameTimestampNanos!! - staleTimestamp) / 1_000_000}"
+                )
+            }
+        ) ?: run {
+            val waitedMillis = (System.nanoTime() - startedAtNanos) / 1_000_000
+            if (minFrameTimestampNanos != null && discardedCount > 0) {
+                AppDebugLogStore.e(
+                    logTag,
+                    "frame-not-fresh minTs=$minFrameTimestampNanos discarded=$discardedCount " +
+                        "waitedMillis=$waitedMillis",
+                    null
+                )
+                throw StaleFrameException(
+                    "截图未取得窗口隐藏后的新帧（已丢弃 $discardedCount 个旧帧，等待 ${waitedMillis}ms）"
+                )
+            }
+            AppDebugLogStore.e(
+                logTag,
+                "frame-unavailable minTs=${minFrameTimestampNanos ?: "-"} waitedMillis=$waitedMillis",
+                null
+            )
+            error("未获取到屏幕内容")
+        }
+        AppDebugLogStore.i(
+            logTag,
+            "frame-accepted ts=${image.timestamp} minTs=${minFrameTimestampNanos ?: "-"} " +
+                "ageMillis=${(System.nanoTime() - image.timestamp) / 1_000_000} " +
+                "discarded=$discardedCount waitedMillis=${(System.nanoTime() - startedAtNanos) / 1_000_000}"
+        )
         image.use {
             val plane = it.planes.first()
             val buffer: ByteBuffer = plane.buffer
@@ -190,13 +255,6 @@ object ProjectionSessionManager {
         _sessionActive.value = false
     }
 
-    private fun waitForImage(reader: ImageReader): Image? {
-        repeat(15) {
-            reader.acquireLatestImage()?.let { return it }
-            Thread.sleep(40)
-        }
-        return null
-    }
 }
 
 private inline fun <reified T> Intent.getParcelableExtraCompat(name: String): T? {

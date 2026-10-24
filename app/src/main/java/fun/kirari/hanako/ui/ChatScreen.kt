@@ -11,8 +11,6 @@ import android.provider.OpenableColumns
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.util.Base64
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -71,6 +69,8 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -108,7 +108,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -121,11 +123,14 @@ import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import `fun`.kirari.hanako.chat.ChatModelCatalog
 import `fun`.kirari.hanako.chat.ChatSessionHolder
-import `fun`.kirari.hanako.chat.splitSessionsByTime
+import `fun`.kirari.hanako.chat.groupSessionsByTime
 import `fun`.kirari.hanako.copyToClipboardWithToast
+import `fun`.kirari.hanako.data.ChatImageStore
+import `fun`.kirari.hanako.data.ChatMessageStatus
 import `fun`.kirari.hanako.data.ChatRole
 import `fun`.kirari.hanako.data.ChatSession
 import `fun`.kirari.hanako.data.ModelProviderConfig
+import `fun`.kirari.hanako.overlay.TtsHelper
 import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -165,6 +170,9 @@ internal fun ChatScreen(
     val session by holder.session.collectAsState()
     val sessions by holder.sessions.collectAsState()
     val isStreaming = session.isStreaming
+    // 朗读共享状态：右上角自动朗读开关 + 当前正在朗读的消息 id（消息底部喇叭动画据此显示）。
+    val autoReadEnabled by TtsHelper.autoReadEnabled.collectAsState()
+    val readingMessageId by TtsHelper.readingMessageId.collectAsState()
     var input by rememberSaveable { mutableStateOf("") }
     var panelExpanded by rememberSaveable { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -181,6 +189,8 @@ internal fun ChatScreen(
     var cameraUri by remember { mutableStateOf<Uri?>(null) }
     // 全屏相册选择页开关（「+」面板的相册入口 / 照片区上拉 / 附件行「+」都打开同一个页面）。
     var albumPageOpen by remember { mutableStateOf(false) }
+    // 全屏图片查看：点击气泡里的已发送图片时记录其本地路径（null 表示未打开）。
+    var viewingImagePath by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     // 底部上滑唤出导航栏的触发阈值。
     val navRevealThresholdPx = with(LocalDensity.current) { 36.dp.toPx() }
@@ -309,39 +319,34 @@ internal fun ChatScreen(
         }
     }
 
-    // 语音播放：系统 TTS 朗读 AI 回复正文。
-    val ttsReady = remember { mutableStateOf(false) }
-    val tts = remember {
-        TextToSpeech(context) { status -> ttsReady.value = status == TextToSpeech.SUCCESS }
-    }
+    // 语音播放：与悬浮球共用同一 TTS 引擎（AppContainer 已初始化，这里幂等补充初始化，
+    // 避免 OverlayService 停止并 shutdown 引擎后聊天页朗读失效）。
+    // 朗读状态（正在朗读哪条消息 / 右上角自动朗读开关）统一由 TtsHelper 持有，
+    // 供消息底部喇叭动画与顶部开关共享，同一时间仅一条消息处于朗读态。
     DisposableEffect(Unit) {
-        onDispose {
-            tts.stop()
-            tts.shutdown()
-        }
+        TtsHelper.init(context)
+        onDispose { }
     }
-    val speak: (String) -> Unit = { raw ->
+    val speak: (String, String?) -> Unit = { raw, messageId ->
         val speech = stripMarkdownForSpeech(raw)
         when {
             speech.isBlank() ->
                 Toast.makeText(context, "没有可朗读的内容", Toast.LENGTH_SHORT).show()
 
-            ttsReady.value ->
-                tts.speak(
-                    speech,
-                    TextToSpeech.QUEUE_FLUSH,
-                    null,
-                    "hanako_${System.currentTimeMillis()}"
-                )
-
-            else ->
+            !TtsHelper.isReady ->
                 Toast.makeText(context, "语音播放尚未就绪，请稍后重试", Toast.LENGTH_SHORT).show()
+
+            else -> TtsHelper.speak(speech, messageId)
         }
     }
 
-    // 离开聊天页时立即收起抽屉（DisposableEffect 在组合提交后同步执行，不留残留帧）。
+    // 离开聊天页时立即收起抽屉（DisposableEffect 在组合提交后同步执行，不留残留帧）；
+    // 同时停止当前朗读（含右上角自动朗读正在朗读的内容），避免切到其它功能页后继续出声。
     DisposableEffect(isActive) {
-        if (!isActive) showDrawer = false
+        if (!isActive) {
+            showDrawer = false
+            TtsHelper.stop()
+        }
         onDispose { }
     }
 
@@ -364,17 +369,54 @@ internal fun ChatScreen(
         }
     }
 
+    // 右上角自动朗读：仅对「开关开启之后新完成」的 AI 回复朗读。
+    // 开启瞬间把当前会话已有的 Done 消息视为「已读」，避免历史回复被自动朗读；
+    // 切换到其它会话时同样重置，只朗读当前会话内新完成的回复。
+    val autoReadIds = remember { mutableStateOf(setOf<String>()) }
+    LaunchedEffect(session.id, autoReadEnabled) {
+        if (autoReadEnabled) {
+            autoReadIds.value = session.messages
+                .filter { it.role == ChatRole.Assistant && it.status == ChatMessageStatus.Done }
+                .map { it.id }
+                .toSet()
+        }
+    }
+    val autoReadTarget = session.messages.lastOrNull()
+    LaunchedEffect(autoReadTarget?.id, autoReadTarget?.status) {
+        if (autoReadEnabled &&
+            autoReadTarget?.role == ChatRole.Assistant &&
+            autoReadTarget.status == ChatMessageStatus.Done &&
+            autoReadTarget.content.isNotBlank() &&
+            autoReadTarget.id !in autoReadIds.value
+        ) {
+            autoReadIds.value = autoReadIds.value + autoReadTarget.id
+            TtsHelper.speak(stripMarkdownForSpeech(autoReadTarget.content), autoReadTarget.id)
+        }
+    }
+
+    // 打开相册等全屏功能页时停止朗读（含自动朗读），避免在其它界面背后继续出声。
+    LaunchedEffect(albumPageOpen) {
+        if (albumPageOpen) TtsHelper.stop()
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
         ) {
-            // 轻量顶栏（无分隔线）：侧边栏 / 模型切换 / 新建对话
+            // 轻量顶栏（无分隔线）：侧边栏 / 模型切换 / 新建对话。
+            // 顶栏空白处同样属于「非功能区域」：点击自动收起键盘与「+」功能面板。
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                    .pointerInput(Unit) {
+                        detectTapGestures {
+                            focusManager.clearFocus()
+                            if (panelExpanded) panelExpanded = false
+                        }
+                    },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -388,18 +430,45 @@ internal fun ChatScreen(
                     modifier = Modifier.weight(1f, fill = false)
                 )
                 Spacer(modifier = Modifier.weight(1f))
+                // 右上角「自动朗读」开关：开启后每次回复完成自动朗读该回复；关闭态显示划掉喇叭。
+                // 正在朗读时与消息底部喇叭显示同一声波动画；再次点击（无论是否在朗读）停止朗读并切换开关。
+                IconButton(onClick = { TtsHelper.toggleAutoRead() }) {
+                    if (readingMessageId != null) {
+                        ReadingSpeakerIcon(
+                            modifier = Modifier.size(24.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    } else {
+                        Icon(
+                            if (autoReadEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                            contentDescription = if (autoReadEnabled) {
+                                "自动朗读已开启（点击关闭）"
+                            } else {
+                                "自动朗读已关闭（点击开启）"
+                            },
+                            tint = if (autoReadEnabled) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                }
                 IconButton(onClick = { holder.newSession() }) {
                     Icon(Icons.Default.Add, contentDescription = "新建对话")
                 }
             }
 
-            // 消息区：点击输入框以外的空白处自动收起键盘。
+            // 消息区：点击输入框以外的空白处自动收起键盘；「+」面板展开时同时收起面板（与键盘互斥）。
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .pointerInput(Unit) {
-                        detectTapGestures { focusManager.clearFocus() }
+                        detectTapGestures {
+                            focusManager.clearFocus()
+                            if (panelExpanded) panelExpanded = false
+                        }
                     }
             ) {
                 if (session.messages.isEmpty()) {
@@ -425,7 +494,11 @@ internal fun ChatScreen(
                                     )
                                 },
                                 onRegenerate = holder::retry,
-                                onSpeak = speak
+                                onSpeak = { speak(message.content, message.id) },
+                                isReading = readingMessageId == message.id,
+                                onStopSpeak = { TtsHelper.stop() },
+                                // 点击气泡里的已发送图片 → 全屏查看（见下方 ChatImageViewer）。
+                                onImageClick = { viewingImagePath = it }
                             )
                         }
                     }
@@ -453,11 +526,13 @@ internal fun ChatScreen(
                         input = ""
                         attachments = emptyList()
                         scope.launch {
-                            val encoded = withContext(Dispatchers.IO) {
-                                images.filter { it.isImage }
-                                    .mapNotNull { encodeImageBase64(context, it.uri) }
+                            // 同一份图片字节既用于多模态发送（base64），也落盘为气泡回显用的本地副本。
+                            val (encoded, imagePaths) = withContext(Dispatchers.IO) {
+                                val encoded = images.filter { it.isImage }
+                                    .mapNotNull { ChatImageStore.encodeUri(context, it.uri) }
+                                encoded to ChatImageStore.saveAll(context, encoded)
                             }
-                            holder.send(text, encoded)
+                            holder.send(text, encoded, imagePaths)
                         }
                     }
                 }
@@ -641,11 +716,17 @@ internal fun ChatScreen(
                                             if (state.isFocused && panelExpanded) panelExpanded = false
                                         },
                                     placeholder = {
-                                        Text(if (isInputFocused) "发消息…" else "发消息或按住说话…")
+                                        // 恒单行占位符：窄屏/大字号下自动缩小字号（响应式），任何机型不换行。
+                                        OneLinePlaceholder(
+                                            text = if (isInputFocused) "发消息…" else "发消息或按住说话…",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     },
                                     shape = RoundedCornerShape(22.dp),
                                     singleLine = !isInputFocused,
-                                    minLines = if (isInputFocused) 2 else 1,
+                                    // 聚焦时保持 1 行起步（随内容增长到 maxLines），消除空置第二行，
+                                    // 让输入区与下方功能键行间距紧凑（用户整改点 2）。
+                                    minLines = 1,
                                     maxLines = 4,
                                     colors = OutlinedTextFieldDefaults.colors(
                                         focusedContainerColor = Color.Transparent,
@@ -666,7 +747,8 @@ internal fun ChatScreen(
                                     modifier = Modifier.padding(
                                         start = 4.dp,
                                         end = 8.dp,
-                                        top = 2.dp,
+                                        // 紧贴第一层输入区（整改点 2：缩小两区间距）。
+                                        top = 0.dp,
                                         bottom = 4.dp
                                     ),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -848,6 +930,12 @@ internal fun ChatScreen(
             )
         }
 
+        // 已发送图片的全屏查看层：叠加在最上层，轻触关闭（不创建新窗口）。
+        ChatImageViewer(
+            imagePath = viewingImagePath,
+            onDismiss = { viewingImagePath = null }
+        )
+
         // 底部上滑薄条：聊天页隐藏底部导航栏后，在此向上滑动即可唤回导航栏。
         Box(
             modifier = Modifier
@@ -953,9 +1041,9 @@ internal fun SessionHistoryDrawer(
             sessions.filter { it.title.contains(q, ignoreCase = true) }
         }
     }
-    // 置顶会话排前，其余按时间分组（今天 / 更早）。
+    // 置顶会话排前，其余按时间分组（今天 / 昨天 / 7天内 / 30天内 / 按月）。
     val (pinnedList, normalList) = remember(filtered) { filtered.partition { it.pinned } }
-    val (todayList, earlierList) = remember(normalList) { splitSessionsByTime(normalList) }
+    val timeGroups = remember(normalList) { groupSessionsByTime(normalList) }
 
     // 抽屉主体包在 Box 中：overlaySafe 模式下弹层在窗口内覆盖渲染（不创建新窗口）。
     Box(modifier = Modifier.fillMaxSize()) {
@@ -1038,94 +1126,44 @@ internal fun SessionHistoryDrawer(
                         .weight(1f)
                         .fillMaxWidth()
                 ) {
+                    // 所有分组（置顶 + 时间组）共用同一行渲染，避免重复。
+                    val renderRow: @Composable (ChatSession) -> Unit = { item ->
+                        SessionHistoryDrawerRow(
+                            session = item,
+                            isCurrent = item.id == currentSessionId,
+                            selectionMode = selectionMode,
+                            selected = item.id in selectedIds,
+                            overlaySafe = overlaySafe,
+                            contextMenuOpen = contextMenuTarget?.id == item.id,
+                            onContextMenu = { contextMenuTarget = item },
+                            onSelect = onSelect,
+                            onToggleSelect = { id ->
+                                selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
+                            },
+                            onRenameRequest = { session ->
+                                renameTarget = session
+                                renameText = session.title
+                            },
+                            onDelete = { id -> pendingDeleteIds = setOf(id) },
+                            onTogglePin = onTogglePin,
+                            onEnterMultiSelect = { id ->
+                                selectionMode = true
+                                selectedIds = setOf(id)
+                            }
+                        )
+                    }
                     if (pinnedList.isNotEmpty()) {
                         item(key = "__group_pinned__") {
                             HistorySectionLabel(text = "置顶")
                         }
-                        items(pinnedList, key = { it.id }) { item ->
-                            SessionHistoryDrawerRow(
-                                session = item,
-                                isCurrent = item.id == currentSessionId,
-                                selectionMode = selectionMode,
-                                selected = item.id in selectedIds,
-                                overlaySafe = overlaySafe,
-                                contextMenuOpen = contextMenuTarget?.id == item.id,
-                                onContextMenu = { contextMenuTarget = item },
-                                onSelect = onSelect,
-                                onToggleSelect = { id ->
-                                    selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
-                                },
-                                onRenameRequest = { session ->
-                                    renameTarget = session
-                                    renameText = session.title
-                                },
-                                onDelete = { id -> pendingDeleteIds = setOf(id) },
-                                onTogglePin = onTogglePin,
-                                onEnterMultiSelect = { id ->
-                                    selectionMode = true
-                                    selectedIds = setOf(id)
-                                }
-                            )
-                        }
+                        items(pinnedList, key = { it.id }) { item -> renderRow(item) }
                     }
-                    if (todayList.isNotEmpty()) {
-                        item(key = "__group_today__") {
-                            HistorySectionLabel(text = "今天")
-                        }
-                        items(todayList, key = { it.id }) { item ->
-                            SessionHistoryDrawerRow(
-                                session = item,
-                                isCurrent = item.id == currentSessionId,
-                                selectionMode = selectionMode,
-                                selected = item.id in selectedIds,
-                                overlaySafe = overlaySafe,
-                                contextMenuOpen = contextMenuTarget?.id == item.id,
-                                onContextMenu = { contextMenuTarget = item },
-                                onSelect = onSelect,
-                                onToggleSelect = { id ->
-                                    selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
-                                },
-                                onRenameRequest = { session ->
-                                    renameTarget = session
-                                    renameText = session.title
-                                },
-                                onDelete = { id -> pendingDeleteIds = setOf(id) },
-                                onTogglePin = onTogglePin,
-                                onEnterMultiSelect = { id ->
-                                    selectionMode = true
-                                    selectedIds = setOf(id)
-                                }
-                            )
-                        }
-                    }
-                    if (earlierList.isNotEmpty()) {
-                        item(key = "__group_earlier__") {
-                            HistorySectionLabel(text = "更早")
-                        }
-                        items(earlierList, key = { it.id }) { item ->
-                            SessionHistoryDrawerRow(
-                                session = item,
-                                isCurrent = item.id == currentSessionId,
-                                selectionMode = selectionMode,
-                                selected = item.id in selectedIds,
-                                overlaySafe = overlaySafe,
-                                contextMenuOpen = contextMenuTarget?.id == item.id,
-                                onContextMenu = { contextMenuTarget = item },
-                                onSelect = onSelect,
-                                onToggleSelect = { id ->
-                                    selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
-                                },
-                                onRenameRequest = { session ->
-                                    renameTarget = session
-                                    renameText = session.title
-                                },
-                                onDelete = { id -> pendingDeleteIds = setOf(id) },
-                                onTogglePin = onTogglePin,
-                                onEnterMultiSelect = { id ->
-                                    selectionMode = true
-                                    selectedIds = setOf(id)
-                                }
-                            )
+                    timeGroups.forEach { group ->
+                        if (group.sessions.isNotEmpty()) {
+                            item(key = "__group_${group.label}__") {
+                                HistorySectionLabel(text = group.label)
+                            }
+                            items(group.sessions, key = { it.id }) { item -> renderRow(item) }
                         }
                     }
                 }
@@ -1739,12 +1777,48 @@ private fun stripMarkdownForSpeech(text: String): String =
         .replace(Regex("\\s+"), " ")
         .trim()
 
-/** 把图片 Uri 编码为 base64（用于多模态发送，支持多张）。 */
-private fun encodeImageBase64(context: Context, uri: Uri): String? = runCatching {
-    context.contentResolver.openInputStream(uri)?.use { stream ->
-        Base64.encodeToString(stream.readBytes(), Base64.NO_WRAP)
+/**
+ * 输入框占位符：恒单行显示（响应式）。
+ *
+ * 不同机型屏幕宽度 / 系统字号缩放不同，固定字号会让「发消息或按住说话…」在窄屏或大字号下换行成两行。
+ * 这里按容器实际宽度用 TextMeasurer 实测，从 16sp 起以 0.5sp 步长收缩字号直到单行放得下（下限 10sp），
+ * 保证任何机型都保持一行完整显示。
+ */
+@Composable
+private fun OneLinePlaceholder(text: String, color: Color) {
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+    val placeholderStyle = MaterialTheme.typography.bodyMedium
+    var fontSize by remember(text) { mutableStateOf(16.sp) }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onSizeChanged { size ->
+                // 实测当前字号下单行宽度，超出容器宽度则逐级缩小。
+                fontSize = with(density) {
+                    var fs = 16.sp
+                    while (fs.value > 10f) {
+                        val measured = textMeasurer.measure(
+                            text = AnnotatedString(text),
+                            style = placeholderStyle.copy(fontSize = fs),
+                            maxLines = 1
+                        )
+                        if (measured.size.width <= size.width) break
+                        fs = (fs.value - 0.5f).sp
+                    }
+                    fs
+                }
+            }
+    ) {
+        Text(
+            text = text,
+            color = color,
+            style = placeholderStyle.copy(fontSize = fontSize),
+            maxLines = 1,
+            overflow = TextOverflow.Clip
+        )
     }
-}.getOrNull()
+}
 
 /** 千问式语音输入图标：圆形描边 + 内部声波。 */
 @Composable

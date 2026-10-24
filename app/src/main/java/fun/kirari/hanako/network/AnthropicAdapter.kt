@@ -87,6 +87,7 @@ internal class AnthropicAdapter(
                 mediaType,
                 headers = mapOf("anthropic-version" to ANTHROPIC_VERSION)
             ),
+            traceId = request.traceId,
             firstDeltaTimeoutMillis = request.firstDeltaTimeoutMillis,
             onEvent = { _, type, _, data ->
                 if (data == "[DONE]") return@stream SseStreamClient.StreamEventResult(done = true)

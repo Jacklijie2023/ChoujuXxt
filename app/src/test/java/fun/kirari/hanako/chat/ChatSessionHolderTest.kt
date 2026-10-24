@@ -1,5 +1,6 @@
 package `fun`.kirari.hanako.chat
 
+import `fun`.kirari.hanako.data.ChatMessage
 import `fun`.kirari.hanako.data.ChatMessageStatus
 import `fun`.kirari.hanako.data.ChatRole
 import `fun`.kirari.hanako.data.ChatSession
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import java.util.Calendar
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -48,13 +50,13 @@ class ChatSessionHolderTest {
 
     private fun holder(scope: CoroutineScope, vararg streams: Flow<LlmEvent>): ChatSessionHolder {
         val queue = ArrayDeque(streams.toList())
-        val source = ChatStreamSource { _, _, _, _, _, _, _, _, _ -> queue.removeFirst() }
+        val source = ChatStreamSource { _, _, _, _, _, _, _, _, _, _, _ -> queue.removeFirst() }
         return ChatSessionHolder(streamSource = source, configProvider = { config }, scope = scope)
     }
 
     private fun holderWithoutProvider(scope: CoroutineScope): ChatSessionHolder =
         ChatSessionHolder(
-            streamSource = ChatStreamSource { _, _, _, _, _, _, _, _, _ -> flowOf() },
+            streamSource = ChatStreamSource { _, _, _, _, _, _, _, _, _, _, _ -> flowOf() },
             configProvider = { config.copy(provider = null) },
             scope = scope
         )
@@ -108,6 +110,21 @@ class ChatSessionHolderTest {
         assertEquals("Hello", session.messages[1].content)
         assertEquals(ChatMessageStatus.Done, session.messages[1].status)
         assertFalse(session.isStreaming)
+    }
+
+    @Test
+    fun user_message_records_attached_image_paths_for_bubble_echo() {
+        val scope = CoroutineScope(Dispatchers.Default)
+        val holder = holder(scope, flowOf(LlmEvent.Done))
+        val paths = listOf("/files/chat_images/chat_1_0.img", "/files/chat_images/chat_1_1.img")
+
+        // 「仅发送图片、不带文字」：气泡用占位文案 + 本地图片路径回显。
+        holder.send("", listOf("AAAA", "BBBB"), paths)
+        val session = settle(holder)
+        val user = session.messages.first { it.role == ChatRole.User }
+
+        assertEquals("无文字时必须使用图片占位文案", ChatMessage.IMAGE_ONLY_PLACEHOLDER, user.content)
+        assertEquals("已发送图片的本地路径必须存入消息，供气泡回显", paths, user.imagePaths)
     }
 
     @Test
@@ -333,7 +350,7 @@ class ChatSessionHolderTest {
         var capturedProvider: ModelProviderConfig? = null
         var capturedModel: String? = null
         val holder = ChatSessionHolder(
-            streamSource = ChatStreamSource { p, m, _, _, _, _, _, _, _ ->
+            streamSource = ChatStreamSource { p, m, _, _, _, _, _, _, _, _, _ ->
                 capturedProvider = p
                 capturedModel = m
                 flowOf(LlmEvent.Done)
@@ -357,7 +374,7 @@ class ChatSessionHolderTest {
         var capturedProvider: ModelProviderConfig? = null
         var capturedModel: String? = null
         val holder = ChatSessionHolder(
-            streamSource = ChatStreamSource { p, m, _, _, _, _, _, _, _ ->
+            streamSource = ChatStreamSource { p, m, _, _, _, _, _, _, _, _, _ ->
                 capturedProvider = p
                 capturedModel = m
                 flowOf(LlmEvent.Done)
@@ -420,7 +437,7 @@ class ChatSessionHolderTest {
         var capturedWebSearch: Boolean? = null
         var capturedThinking: Boolean? = null
         val holder = ChatSessionHolder(
-            streamSource = ChatStreamSource { _, _, _, _, _, ws, th, _, _ ->
+            streamSource = ChatStreamSource { _, _, _, _, _, ws, th, _, _, _, _ ->
                 capturedWebSearch = ws
                 capturedThinking = th
                 flowOf(LlmEvent.Done)
@@ -466,7 +483,7 @@ class ChatSessionHolderTest {
         vararg streams: Flow<LlmEvent>
     ): ChatSessionHolder {
         val queue = ArrayDeque(streams.toList())
-        val source = ChatStreamSource { _, _, _, _, _, _, _, _, _ -> queue.removeFirst() }
+        val source = ChatStreamSource { _, _, _, _, _, _, _, _, _, _, _ -> queue.removeFirst() }
         return ChatSessionHolder(
             streamSource = source,
             configProvider = { config },
@@ -530,31 +547,65 @@ class ChatSessionHolderTest {
     }
 
     // ========================
-    // S2：历史时间分组
+    // S2：历史时间分组（今天 / 昨天 / 7天内 / 30天内 / 按月）
     // ========================
 
     @Test
-    fun split_sessions_by_time_groups_today_and_earlier() {
+    fun group_sessions_by_time_today_and_yesterday() {
         val now = 1_700_000_000_000L // 固定瞬时，避免真实时钟影响
         val today = ChatSession(title = "today", createdAtMillis = now)
-        val earlier = ChatSession(title = "earlier", createdAtMillis = now - 2 * 24 * 3600_000L)
+        val yesterday = ChatSession(title = "yesterday", createdAtMillis = now - 24 * 3600_000L)
 
-        val (todayList, earlierList) = splitSessionsByTime(listOf(earlier, today), nowMillis = now)
+        val groups = groupSessionsByTime(listOf(yesterday, today), nowMillis = now)
 
-        assertEquals(listOf("today"), todayList.map { it.title })
-        assertEquals(listOf("earlier"), earlierList.map { it.title })
+        assertEquals(listOf("今天", "昨天"), groups.map { it.label })
+        assertEquals(listOf("today"), groups[0].sessions.map { it.title })
+        assertEquals(listOf("yesterday"), groups[1].sessions.map { it.title })
     }
 
     @Test
-    fun split_sessions_by_time_orders_newest_first_within_group() {
+    fun group_sessions_by_time_orders_newest_first_within_group() {
         val now = 1_700_000_000_000L
         val older = ChatSession(title = "older", createdAtMillis = now - 3_600_000L)
         val newest = ChatSession(title = "newest", createdAtMillis = now)
 
-        val (todayList, earlierList) = splitSessionsByTime(listOf(older, newest), nowMillis = now)
+        val groups = groupSessionsByTime(listOf(older, newest), nowMillis = now)
 
-        assertEquals(listOf("newest", "older"), todayList.map { it.title })
-        assertTrue(earlierList.isEmpty())
+        assertEquals(listOf("今天"), groups.map { it.label })
+        assertEquals(listOf("newest", "older"), groups[0].sessions.map { it.title })
+    }
+
+    @Test
+    fun group_sessions_by_time_seven_and_thirty_days() {
+        val now = 1_700_000_000_000L
+        val sevenDay = ChatSession(title = "sevenDay", createdAtMillis = now - 3 * 24 * 3600_000L)
+        val thirtyDay = ChatSession(title = "thirtyDay", createdAtMillis = now - 15 * 24 * 3600_000L)
+
+        val groups = groupSessionsByTime(listOf(thirtyDay, sevenDay), nowMillis = now)
+
+        assertEquals(listOf("7天内", "30天内"), groups.map { it.label })
+    }
+
+    @Test
+    fun group_sessions_by_time_month_group_for_old_sessions() {
+        val now = 1_700_000_000_000L
+        val monthA = ChatSession(title = "monthA", createdAtMillis = now - 40 * 24 * 3600_000L)
+        val monthB = ChatSession(title = "monthB", createdAtMillis = now - 400 * 24 * 3600_000L)
+
+        val groups = groupSessionsByTime(listOf(monthA, monthB), nowMillis = now)
+
+        // 40 / 400 天前必然落在「更早按月」分组；二者相差 360 天必然跨不同月份。
+        assertEquals(2, groups.size)
+        assertEquals(monthLabel(monthA.createdAtMillis), groups[0].label)
+        assertEquals(monthLabel(monthB.createdAtMillis), groups[1].label)
+        assertEquals(listOf("monthA"), groups[0].sessions.map { it.title })
+        assertEquals(listOf("monthB"), groups[1].sessions.map { it.title })
+    }
+
+    /** 按会话创建时间生成本地「yyyy年M月」标签（与 groupSessionsByTime 的月份分组口径一致）。 */
+    private fun monthLabel(millis: Long): String = with(Calendar.getInstance()) {
+        timeInMillis = millis
+        "${get(Calendar.YEAR)}年${get(Calendar.MONTH) + 1}月"
     }
 
     // ========================

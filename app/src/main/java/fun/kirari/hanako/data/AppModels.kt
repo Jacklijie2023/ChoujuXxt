@@ -1,5 +1,6 @@
 package `fun`.kirari.hanako.data
 
+import `fun`.kirari.hanako.screencontext.TargetAppMode
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -176,6 +177,48 @@ data class AutomationSettings(
     val autoModeTimeoutSeconds: Int = 30
 )
 
+/**
+ * 悬浮球外观设置。
+ *
+ * [customIconPath] 为用户上传的自定义悬浮球图标文件路径（应用私有目录内，
+ * 由 FloatingBallIconStore 高清缩小后保存）；为空时使用默认内置图标。
+ */
+@Serializable
+data class FloatingBallSettings(
+    val customIconPath: String? = null
+)
+
+/** 迷你聊天窗口外观设置。 */
+@Serializable
+data class MiniChatSettings(
+    /** 迷你聊天窗整体透明度（0.3~1.0，1 为完全不透明）。 */
+    val backgroundAlpha: Float = 0.92f
+)
+
+/** 界面亮暗模式：跟随系统 / 白天 / 黑夜。 */
+@Serializable
+enum class ThemeMode {
+    SYSTEM,
+    LIGHT,
+    DARK
+}
+
+/** 界面配色风格（不同系统风格）。 */
+@Serializable
+enum class ThemeColorStyle {
+    /** 默认（青绿，可跟随系统动态取色）。 */
+    DEFAULT,
+
+    /** 粉黛：粉色系。 */
+    PINK,
+
+    /** 森林：绿色系。 */
+    FOREST,
+
+    /** 星空：紫色系。 */
+    MIDNIGHT
+}
+
 @Serializable
 data class AppSettings(
     val providers: List<ModelProviderConfig> = listOf(defaultProvider()),
@@ -190,6 +233,30 @@ data class AppSettings(
     val visionModelSelection: ModelSelection = ModelSelection(),
     val ocrModelSelection: ModelSelection = ModelSelection(),
     val localOcr: LocalOcrSettings = LocalOcrSettings(),
+    val floatingBall: FloatingBallSettings = FloatingBallSettings(),
+    val miniChat: MiniChatSettings = MiniChatSettings(),
+    /** 界面亮暗模式（设置页「主题」）。 */
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    /** 界面配色风格（设置页「主题」）。 */
+    val colorStyle: ThemeColorStyle = ThemeColorStyle.DEFAULT,
+    /** 实时屏幕感知开关：开启后无障碍持续更新当前屏幕上下文，供聊天指令即时分析。 */
+    val realTimeMode: Boolean = false,
+    /**
+     * 用户选定的目标刷题应用包名（题目上下文的身份白名单）。
+     *
+     * R7 起语义收窄为「[targetAppMode] = RESTRICTED 模式下的**手动选择值**」：仅在选择模式下
+     * 参与「是否允许建立绑定」的判定。为 null / 空白表示**尚未选定**。不得仅凭「窗口包名不是
+     * Hanako 自身」就把桌面（如 com.miui.home）、通知栏或任意第三方应用当作目标刷题应用。
+     */
+    val targetAppPackage: String? = null,
+    /**
+     * 目标应用绑定模式（R7）。
+     * - AUTO（默认）：首次主动唤醒时按实时确认的前台应用自动建立会话绑定；
+     * - RESTRICTED：只有用户在设置页显式选择的目标应用位于实时前台时才允许建立绑定。
+     */
+    val targetAppMode: TargetAppMode = TargetAppMode.AUTO,
+    /** 朗读语音名称（对应 TTS 引擎 voices 中的 voice.name）；为空时跟随系统默认。 */
+    val ttsVoiceName: String? = null,
     val lastResult: ProcessingResult? = null,
     val history: List<ProcessingResult> = emptyList()
 )

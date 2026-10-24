@@ -2,6 +2,8 @@ package `fun`.kirari.hanako.overlay
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Rect
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -9,6 +11,9 @@ import `fun`.kirari.hanako.AppContainer
 import `fun`.kirari.hanako.automation.BubbleEvent
 import `fun`.kirari.hanako.automation.BubbleState
 import `fun`.kirari.hanako.automation.BubbleStateMachine
+import `fun`.kirari.hanako.capture.LongScreenshotCapturer
+import `fun`.kirari.hanako.capture.ScreenCaptureStartResult
+import `fun`.kirari.hanako.capture.recycleSafely
 import `fun`.kirari.hanako.chat.ChatModelCatalog
 import `fun`.kirari.hanako.chat.ChatSessionHolder
 import `fun`.kirari.hanako.data.AutomationActionType
@@ -20,6 +25,8 @@ import `fun`.kirari.hanako.data.ProcessingStatus
 import `fun`.kirari.hanako.data.ModelSelection
 import `fun`.kirari.hanako.data.ModelProviderConfig
 import `fun`.kirari.hanako.data.SettingsRepository
+import `fun`.kirari.hanako.data.ThemeColorStyle
+import `fun`.kirari.hanako.data.ThemeMode
 import `fun`.kirari.hanako.debug.AppDebugLogStore
 import `fun`.kirari.hanako.localocr.LocalOcrManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,8 +41,15 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+
+/** 长截图开始前，等待悬浮面板收起动画结束的时间（毫秒）。 */
+private const val PANEL_HIDE_SETTLE_MILLIS = 300L
+
+/** 手动长截图最多拼接的屏数（每屏约 10MB，屏数越多越容易 OOM）。 */
+private const val MAX_LONG_PAGES = 8
 
 internal class OverlayViewModel(
     private val appContext: Context,
@@ -49,6 +63,9 @@ internal class OverlayViewModel(
     private val tag = "HanakoOverlayVM"
     private val processingTimeoutMillis = 90_000L
     private var activeAutoProcessingJob: Job? = null
+
+    /** 长截图任务：同一时刻只允许一个（滚动期间重复点击会叠加滚动）。 */
+    private var longCaptureJob: Job? = null
     
     // 新的状态机
     val bubbleStateMachine = BubbleStateMachine()
@@ -60,6 +77,21 @@ internal class OverlayViewModel(
     val providers: StateFlow<List<ModelProviderConfig>> = _uiState
         .map { it.settings.providers }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** 迷你聊天窗透明度（设置页「迷你聊天窗」实时更新；迷你窗渲染据此应用）。 */
+    val miniChatAlpha: StateFlow<Float> = _uiState
+        .map { it.settings.miniChat.backgroundAlpha }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0.92f)
+
+    /** 界面亮暗模式（设置页「主题」；迷你窗渲染据此应用）。 */
+    val themeMode: StateFlow<ThemeMode> = _uiState
+        .map { it.settings.themeMode }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ThemeMode.SYSTEM)
+
+    /** 界面配色风格（设置页「主题」；迷你窗渲染据此应用）。 */
+    val colorStyle: StateFlow<ThemeColorStyle> = _uiState
+        .map { it.settings.colorStyle }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ThemeColorStyle.DEFAULT)
 
     init {
         viewModelScope.launch {
@@ -94,6 +126,12 @@ internal class OverlayViewModel(
 
     fun openCropSheet() {
         AppDebugLogStore.i(tag, "openCropSheet launchMode=${_uiState.value.launchMode}")
+        // 长截图会话中：再次点击悬浮球不是「重新截图」，而是把新一屏拼到已有长图下方。
+        if (_uiState.value.longCaptureActive) {
+            AppDebugLogStore.i(tag, "openCropSheet -> appendLongCapturePage")
+            appendLongCapturePage()
+            return
+        }
         if (_uiState.value.launchMode == OverlayLaunchMode.AUTO) {
             AppDebugLogStore.i(tag, "openCropSheet delegated to processFullScreen for auto mode")
             processFullScreen()
@@ -104,6 +142,9 @@ internal class OverlayViewModel(
             processAccessibilityDirect()
             return
         }
+        // 截图会话丢失（常见于进程被系统回收后重启）时先重新授权，
+        // 否则只会得到「屏幕捕捉会话未初始化」这种无从下手的错误。
+        if (!ensureCaptureSession()) return
         viewModelScope.launch {
             runCatching {
                 `fun`.kirari.hanako.capture.ScreenCaptureManager.captureLatestBitmap(appContext, _uiState.value.settings.screenCaptureMethod)
@@ -121,6 +162,10 @@ internal class OverlayViewModel(
                         sheetVisible = true,
                         sheetMode = OverlaySheetMode.CROP,
                         miniChatVisible = false,
+                        longCaptureActive = false,
+                        longCapturePages = 0,
+                        longScreenshotBitmap = null,
+                        longCaptureCropRect = null,
                         autoRunState = AutoRunState.IDLE,
                         autoCopiedLabel = null
                     )
@@ -138,6 +183,182 @@ internal class OverlayViewModel(
                 }
             }
         }
+    }
+
+    /**
+     * 检查截图会话是否可用；不可用时自动拉起授权页并提示用户。
+     *
+     * MediaProjection 的授权不能跨进程复用：应用被系统回收后重启，就必须重新授权，
+     * 否则所有截图都会报「屏幕捕捉会话未初始化」。
+     */
+    private fun ensureCaptureSession(): Boolean {
+        val method = _uiState.value.settings.screenCaptureMethod
+        if (`fun`.kirari.hanako.capture.ScreenCaptureManager.hasActiveSession(method)) return true
+        val result = `fun`.kirari.hanako.capture.ScreenCaptureManager.requestStart(
+            appContext,
+            method,
+            OverlayLaunchMode.NORMAL
+        )
+        val message = when (result) {
+            ScreenCaptureStartResult.Started ->
+                "截图授权已失效：请在系统弹窗中点「立即开始」，然后重新点击悬浮球"
+            is ScreenCaptureStartResult.UserActionRequired -> result.message
+            is ScreenCaptureStartResult.Failed -> result.message
+        }
+        AppDebugLogStore.e(tag, "ensureCaptureSession unavailable: $message")
+        Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
+        _uiState.update { it.copy(error = message, sheetVisible = false, miniChatVisible = false) }
+        return false
+    }
+
+    /**
+     * 手动长截图的第 1 屏：把当前截图作为已拼接内容，收起面板让用户回到目标页面。
+     */
+    fun startLongCaptureSession(cropRect: Rect?) {
+        val first = _uiState.value.screenshot
+        if (first == null) {
+            Toast.makeText(appContext, "请先截图", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AppDebugLogStore.i(tag, "startLongCaptureSession size=${first.width}x${first.height} crop=$cropRect")
+        _uiState.update {
+            it.copy(
+                longCaptureActive = true,
+                longCapturePages = 1,
+                // 第 1 屏按用户框选区域裁剪后放进「原图」区域；当前截图区仍显示整屏。
+                longScreenshotBitmap = cropToRegion(first, cropRect),
+                longCaptureCropRect = cropRect,
+                sheetVisible = false,
+                selectedBitmap = null,
+                error = null,
+                working = false
+            )
+        }
+        Toast.makeText(
+            appContext,
+            "已记录第 1 屏：向下滚动页面后再次点击悬浮球继续截图",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
+    /** 「继续截图」：收起面板回到目标页面，等用户再点悬浮球截下一屏。 */
+    fun continueLongCapture() {
+        _uiState.update { it.copy(sheetVisible = false, error = null) }
+        Toast.makeText(appContext, "请滚动到需要的内容后再次点击悬浮球", Toast.LENGTH_LONG).show()
+    }
+
+    /**
+     * 手动长截图：截当前屏并拼到已有长图下方（自动裁掉重复的顶部）。
+     *
+     * 采集用 `occludingCaptureRequired = true`，避免把悬浮球/面板拼进长图；
+     * 面板先收起并等待一段延时，确保采集时窗口已经真正隐藏。
+     */
+    private fun appendLongCapturePage() {
+        if (longCaptureJob?.isActive == true) return
+        longCaptureJob = viewModelScope.launch {
+            val settings = _uiState.value.settings
+            _uiState.update { it.copy(sheetVisible = false, error = null, working = true) }
+            delay(PANEL_HIDE_SETTLE_MILLIS)
+            if (!ensureCaptureSession()) {
+                _uiState.update { it.copy(working = false) }
+                return@launch
+            }
+            runCatching {
+                // 拼接基线是「原图」区域里的累计长图（第 1 屏是它本身）。
+                val base = _uiState.value.longScreenshotBitmap
+                    ?: _uiState.value.screenshot
+                    ?: error("长截图会话已结束")
+                if (_uiState.value.longCapturePages >= MAX_LONG_PAGES) {
+                    error("已拼到 $MAX_LONG_PAGES 屏上限，请点「确认处理」结束")
+                }
+                if (base.height >= LongScreenshotCapturer.MAX_STITCH_HEIGHT) {
+                    error("长图已达高度上限，请点「确认处理」结束")
+                }
+                val next = `fun`.kirari.hanako.capture.ScreenCaptureManager.captureLatestBitmap(
+                    context = appContext,
+                    method = settings.screenCaptureMethod,
+                    occludingCaptureRequired = true
+                )
+                // 只把用户框选的区域拼进原图：第 1 屏按框选裁剪，后续每屏沿用同一区域。
+                val page = cropToRegion(next, _uiState.value.longCaptureCropRect)
+                // 拼接失败才回收；拼接成功时 next 要继续作为「当前截图」显示在面板下方。
+                val result = try {
+                    if (base.height + page.height >
+                        LongScreenshotCapturer.MAX_STITCH_HEIGHT + LongScreenshotCapturer.MIN_OVERLAP_ROWS
+                    ) {
+                        error("继续拼接会超出高度上限，请点「确认处理」结束")
+                    }
+                    LongScreenshotCapturer.appendScreen(base, page)
+                } catch (t: Throwable) {
+                    if (page !== next) page.recycleSafely()
+                    next.recycleSafely()
+                    throw t
+                }
+                if (page !== next) page.recycleSafely()
+                result to next
+            }.onSuccess { (result, next) ->
+                if (result.addedRows <= 0) {
+                    // 页面没有滚动（或已到底）：不新增屏数，当前截图区保持原样并提示用户。
+                    result.bitmap.recycleSafely()
+                    next.recycleSafely()
+                    AppDebugLogStore.i(tag, "appendLongCapturePage no new rows overlap=${result.overlapRows}")
+                    Toast.makeText(appContext, "画面没有变化：请继续向下滚动后再截图", Toast.LENGTH_LONG).show()
+                    _uiState.update {
+                        it.copy(working = false, sheetVisible = true, sheetMode = OverlaySheetMode.CROP, error = null)
+                    }
+                    return@onSuccess
+                }
+                val pages = _uiState.value.longCapturePages + 1
+                AppDebugLogStore.i(
+                    tag,
+                    "appendLongCapturePage pages=$pages overlap=${result.overlapRows} " +
+                        "size=${result.bitmap.width}x${result.bitmap.height}"
+                )
+                _uiState.update {
+                    it.copy(
+                        // 当前截图区显示「这一屏」，原图区域显示累计拼接结果。
+                        screenshot = next,
+                        longScreenshotBitmap = result.bitmap,
+                        selectedBitmap = null,
+                        longCapturePages = pages,
+                        working = false,
+                        sheetVisible = true,
+                        sheetMode = OverlaySheetMode.CROP,
+                        error = null
+                    )
+                }
+                if (pages >= MAX_LONG_PAGES) {
+                    Toast.makeText(appContext, "已拼到 $MAX_LONG_PAGES 屏上限，点「确认处理」结束", Toast.LENGTH_LONG).show()
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                AppDebugLogStore.e(tag, "appendLongCapturePage failed", error)
+                val message = error.message ?: "长截图失败"
+                Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
+                _uiState.update {
+                    it.copy(
+                        working = false,
+                        sheetVisible = true,
+                        sheetMode = OverlaySheetMode.CROP,
+                        error = message
+                    )
+                }
+            }
+        }
+    }
+
+    /** 按长截图会话记录的裁剪区域裁出这一屏；区域无效（如屏幕旋转后超界）时退回整屏。 */
+    private fun cropToRegion(source: Bitmap, rect: Rect?): Bitmap {
+        if (rect == null) return source
+        if (rect.left < 0 || rect.top < 0 ||
+            rect.right > source.width || rect.bottom > source.height
+        ) {
+            return source
+        }
+        if (rect.width() <= 1 || rect.height() <= 1) return source
+        return runCatching {
+            Bitmap.createBitmap(source, rect.left, rect.top, rect.width(), rect.height())
+        }.getOrDefault(source)
     }
 
     fun processFullScreen() {
@@ -243,7 +464,12 @@ internal class OverlayViewModel(
                     working = true,
                     sheetVisible = true,
                     sheetMode = OverlaySheetMode.RESULT,
-                    miniChatVisible = false
+                    miniChatVisible = false,
+                    // 已开始处理：长截图会话到此结束。
+                    longCaptureActive = false,
+                    longCapturePages = 0,
+                    longScreenshotBitmap = null,
+                    longCaptureCropRect = null
                 )
             }
             upsertHistory(baseResult)
@@ -314,7 +540,17 @@ internal class OverlayViewModel(
     }
 
     fun closeSheet() {
-        _uiState.update { it.copy(sheetVisible = false, error = null) }
+        // 关闭面板即放弃长截图会话，避免下次点悬浮球时被当成「继续拼接」。
+        _uiState.update {
+            it.copy(
+                sheetVisible = false,
+                error = null,
+                longCaptureActive = false,
+                longCapturePages = 0,
+                longScreenshotBitmap = null,
+                longCaptureCropRect = null
+            )
+        }
     }
 
     fun consumeAutoCompletedState() {
@@ -439,7 +675,15 @@ internal class OverlayViewModel(
         val currentState = bubbleStateMachine.currentState
         val launchMode = _uiState.value.launchMode
         AppDebugLogStore.i(tag, "handleSingleTap state=${currentState::class.simpleName} launchMode=$launchMode")
-        
+
+        // 长截图会话中：单击的唯一含义是「把当前屏拼到长图下方」，
+        // 不受气泡状态（如 Copied/ShowingLetters）影响，否则会出现点了没反应。
+        if (_uiState.value.longCaptureActive) {
+            AppDebugLogStore.i(tag, "handleSingleTap -> appendLongCapturePage (long capture active)")
+            appendLongCapturePage()
+            return
+        }
+
         when (currentState) {
             is BubbleState.MultiPageCapture -> {
                 // 多页截图模式下，单击截图
@@ -945,12 +1189,12 @@ internal class OverlayViewModel(
                 bubbleStateMachine.forceState(`fun`.kirari.hanako.automation.BubbleState.Idle)
             }
             AutomationActionType.VOICE_READ -> {
-                TtsHelper.speak(action.text)
+                // 自动模式不再自动朗读：由分析页「答案」模块的手动朗读按钮代替（避免强制出声干扰）。
                 _uiState.update {
                     it.copy(
                         working = false,
                         result = result,
-                        liveAnswerText = "正在朗读...",
+                        liveAnswerText = action.text,
                         autoRunState = AutoRunState.COMPLETED,
                         autoCopiedLabel = null,
                         error = null

@@ -289,8 +289,8 @@ private fun GalleryActionTile(
  * @param onCamera 宿主提供的「拍照」回调，负责真实拉起系统相机。
  * @param onFile 宿主提供的「本地文件」回调，负责真实拉起系统文件选择器。
  * @param onOpenAlbumPage 「相册」按钮 / 照片区上拉：打开宿主的全屏相册页（同一个页面）。
- * @param onAddPhoto 「+」面板照片条：点一下即把该照片加入输入框顶部附件区（单选式）。
- * @param attachedUris 已加入输入框顶部附件区的照片 Uri（用于在照片条上显示勾选）。
+ * @param onAddPhoto 照片区点击回调：主界面照片条与迷你窗网格共用，由宿主切换该照片是否在附件区。
+ * @param attachedUris 已在附件区的照片 Uri（照片条 / 网格勾选态，迷你窗同此）。
  * @param overlaySafe 迷你窗（overlay Service 宿主，无 Activity token）时为 true：
  *   相册分类改用窗口内内联列表（创建新窗口会触发 BadTokenException）。
  */
@@ -310,13 +310,7 @@ internal fun ChatInputActionPanel(
     var photos by remember { mutableStateOf<List<PhonePhoto>>(emptyList()) }
     var albumInfos by remember { mutableStateOf<List<AlbumInfo>>(emptyList()) }
     var selectedAlbum by remember { mutableStateOf<String?>(null) }
-    var selectedUris by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showAlbumMenu by remember { mutableStateOf(false) }
-
-    // 迷你窗内的相册多选：点击切换选中态。
-    val togglePhoto: (String) -> Unit = { key ->
-        selectedUris = if (key in selectedUris) selectedUris - key else selectedUris + key
-    }
 
     LaunchedEffect(hasPermission, selectedAlbum) {
         if (!hasPermission) {
@@ -454,15 +448,18 @@ internal fun ChatInputActionPanel(
             if (photos.isEmpty()) {
                 EmptyPhotos()
             } else {
+                // 点一下即加入/移出输入框附件区（与主界面照片条同一套选中态，宿主负责真正发送）。
                 PhotoGrid(
                     photos = photos,
-                    selectedUris = selectedUris,
-                    onToggle = togglePhoto
+                    selectedUris = attachedUris,
+                    onToggle = { key ->
+                        photos.firstOrNull { it.uri.toString() == key }?.let { onAddPhoto(it.uri) }
+                    }
                 )
             }
 
-            if (selectedUris.isNotEmpty()) {
-                PhotoSelectionHint(selectedUris.size)
+            if (attachedUris.isNotEmpty()) {
+                PhotoSelectionHint(attachedUris.size)
             }
         } else {
             // 主界面「+」面板层级 0（图 3/5）：照片上方不展示相册分类标题，仅展示两行照片；
@@ -588,7 +585,7 @@ private fun PhotoGrid(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        items(photos, key = { it.uri.toString() }) { photo ->
+          items(photos, key = { it.uri.toString() }) { photo ->
             val key = photo.uri.toString()
             SelectablePhotoCell(
                 photo = photo,
@@ -694,7 +691,7 @@ private fun EmptyPhotos() {
 @Composable
 private fun PhotoSelectionHint(count: Int) {
     Text(
-        "已选 $count 张（图片发送即将接入）",
+        "已选 $count 张，点发送即随消息发出",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(start = 4.dp, top = 4.dp)

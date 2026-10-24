@@ -26,7 +26,11 @@ class ChatSessionsJsonTest {
                 ChatSession(
                     title = "会话一",
                     messages = listOf(
-                        ChatMessage(role = ChatRole.User, content = "hi"),
+                        ChatMessage(
+                            role = ChatRole.User,
+                            content = "hi",
+                            imagePaths = listOf("/data/user/0/app/files/chat_images/chat_1_0.img")
+                        ),
                         ChatMessage(role = ChatRole.Assistant, content = "hello", status = ChatMessageStatus.Done)
                     ),
                     selectedProviderId = "p1",
@@ -46,6 +50,11 @@ class ChatSessionsJsonTest {
         assertEquals("model-a", decoded.sessions[0].selectedModel)
         assertEquals(2, decoded.sessions[0].messages.size)
         assertEquals(ChatRole.User, decoded.sessions[0].messages[0].role)
+        assertEquals(
+            "已发送图片的本地路径必须可持久化并在气泡中回显",
+            listOf("/data/user/0/app/files/chat_images/chat_1_0.img"),
+            decoded.sessions[0].messages[0].imagePaths
+        )
         assertEquals(ChatMessageStatus.Done, decoded.sessions[0].messages[1].status)
     }
 
@@ -72,6 +81,7 @@ class ChatSessionsJsonTest {
         assertEquals("", decoded.sessions[0].selectedModel)
         assertEquals(1, decoded.sessions[0].messages.size)
         assertEquals("旧消息", decoded.sessions[0].messages[0].content)
+        assertEquals("旧数据缺少 imagePaths 时必须回退为空列表", emptyList<String>(), decoded.sessions[0].messages[0].imagePaths)
         assertTrue(decoded.sessions[0].messages[0].id.isNotBlank())
         assertNull(decoded.currentSessionId)
     }

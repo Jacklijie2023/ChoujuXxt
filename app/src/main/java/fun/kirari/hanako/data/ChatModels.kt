@@ -20,7 +20,15 @@ enum class ChatRole {
 enum class ChatMessageStatus {
     Streaming,
     Done,
-    Error
+    Error,
+
+    /**
+     * 发送失败（**未发起模型请求**）。
+     *
+     * 与 [Error]（请求已发起但异常 / 未收到 Done 收尾）严格区分：
+     * 实时模式下屏幕上下文不可用时会以该状态回应用户，避免把「已看到屏幕」的假象暴露给用户。
+     */
+    Failed
 }
 
 @Serializable
@@ -29,8 +37,20 @@ data class ChatMessage(
     val role: ChatRole,
     val content: String = "",
     val createdAtMillis: Long = System.currentTimeMillis(),
-    val status: ChatMessageStatus = ChatMessageStatus.Done
-)
+    val status: ChatMessageStatus = ChatMessageStatus.Done,
+    /**
+     * 用户消息随附图片的**本地文件路径**（应用私有目录内的副本）。
+     *
+     * 旧数据缺失时默认空列表，保持向后兼容；图片路径不参与模型上下文，
+     * 仅用于在聊天气泡中回显用户发送过的图片。
+     */
+    val imagePaths: List<String> = emptyList()
+) {
+    companion object {
+        /** 「仅发送图片」时用户气泡的占位文案（不参与模型上下文）。 */
+        const val IMAGE_ONLY_PLACEHOLDER = "［图片］"
+    }
+}
 
 /**
  * 单个聊天会话（含会话级元数据）。

@@ -38,6 +38,8 @@ internal fun OverlayPanel(
                 uiState = uiState,
                 onClose = onDismiss,
                 onConfirm = viewModel::process,
+                onStartLong = viewModel::startLongCaptureSession,
+                onContinueLong = viewModel::continueLongCapture,
                 panelHeightPx = panelHeightPx,
                 modelPickerTarget = modelPickerTarget,
                 onModelPickerTargetChange = { modelPickerTarget = it },

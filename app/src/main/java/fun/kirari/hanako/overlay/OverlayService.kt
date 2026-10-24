@@ -8,6 +8,7 @@ import android.animation.ValueAnimator
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.PorterDuff
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
@@ -19,6 +20,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -26,6 +28,11 @@ import android.widget.TextView
 import android.widget.Toast
 import `fun`.kirari.hanako.automation.BubbleRenderer
 import `fun`.kirari.hanako.automation.BubbleState
+import `fun`.kirari.hanako.capture.CaptureUiGate
+import `fun`.kirari.hanako.capture.CaptureWindowVisibility
+import `fun`.kirari.hanako.capture.MaskWindow
+import `fun`.kirari.hanako.capture.WindowRect
+import `fun`.kirari.hanako.util.FloatingBallIconStore
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -43,6 +50,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import `fun`.kirari.hanako.R
+import `fun`.kirari.hanako.HanakoApplication
 import `fun`.kirari.hanako.capture.MediaProjectionForegroundService
 import `fun`.kirari.hanako.capture.ProjectionPermissionActivity
 import `fun`.kirari.hanako.debug.AppDebugLogStore
@@ -86,6 +94,9 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     private var bubbleColorAnimator: ValueAnimator? = null
     private var bubbleCompletionResetJob: Job? = null
     private var lastHandledCompletionId: String? = null
+    // 自定义悬浮球图标解码缓存（避免每次 uiState 刷新重复解码文件）。
+    private var cachedCustomIconPath: String? = null
+    private var cachedCustomIconDrawable: BitmapDrawable? = null
     private var panelView: FrameLayout? = null
     private var panelContentView: androidx.compose.ui.platform.ComposeView? = null
     private var panelHandleView: FrameLayout? = null
@@ -106,6 +117,36 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     private var miniChatView: FrameLayout? = null
     private var miniChatComposeView: androidx.compose.ui.platform.ComposeView? = null
     private var miniChatParams: WindowManager.LayoutParams? = null
+    /** 迷你聊天窗当前是否处于放大尺寸（长按切换小/大）。 */
+    private var miniChatLarge = false
+
+    /**
+     * 截图期间临时隐藏 Hanako 自有悬浮窗（悬浮球 / 分析面板 / 迷你聊天窗）的可见性记账：
+     * 避免它们被拍进截图污染 OCR；结束后按截图前的可见性精确恢复。
+     */
+    private val captureWindowVisibility = CaptureWindowVisibility<View>(
+        isVisible = { it.visibility == View.VISIBLE },
+        isAttached = { it.isAttachedToWindow },
+        setVisible = { view, visible -> view.visibility = if (visible) View.VISIBLE else View.GONE }
+    )
+
+    /**
+     * 截图隐藏期间被临时置零的**窗口级 alpha 原值**（键为窗口 View）。
+     *
+     * 与 [captureWindowVisibility] 的可见性记账相互独立：前者是 View 标志，这里记的是
+     * `WindowManager.LayoutParams.alpha`（窗口层属性）。两者都必须精确恢复。
+     */
+    private val captureWindowAlphaSnapshot = LinkedHashMap<View, Float>()
+
+    /**
+     * 截图前输入法（软键盘）是否可见，以及当时持有输入焦点的 Hanako 窗口。
+     *
+     * 真机根因（R8.5）：输入法是**独立于 Hanako 的窗口**，既不属于 [hanakoCaptureWindows]，
+     * 也不会被位图遮罩覆盖，因此截图会把键盘按键（`GHI JKL MNO` 等）拍进去并被 OCR 识别成题目。
+     * 隐藏 Hanako 窗口前先收起输入法；采集结束后按此记账把键盘恢复回截图前的可见状态。
+     */
+    private var imeWasVisibleBeforeCapture = false
+    private var imeTargetView: View? = null
 
     // 防截屏检测
     private var secureWindowPollingJob: Job? = null
@@ -137,6 +178,14 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
             observeUiState()
             startSecureWindowPolling()
             startShakeDetection()
+            // 截图期间自动隐藏/恢复 Hanako 自有悬浮窗（悬浮球/分析面板/迷你聊天窗），避免遮挡截图内容。
+            // 「frames」提供窗口屏幕矩形：采集侧默认据此保持窗口可见并对位图做遮罩（消除闪烁）；
+            // 隐藏/恢复仍作为无遮罩能力时的安全回退，路径保留不删除。
+            CaptureUiGate.register(
+                start = ::hideHanakoWindowsForCapture,
+                end = ::restoreHanakoWindowsAfterCapture,
+                frames = ::hanakoCaptureWindowFrames
+            )
         }.onFailure {
             AppDebugLogStore.e(logTag, "Overlay initialization failed", it)
             stopSelf()
@@ -174,6 +223,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     }
 
     override fun onDestroy() {
+        CaptureUiGate.unregister()
         dismissPanel()
         hideMiniChat()
         stopSecureWindowPolling()
@@ -189,6 +239,8 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         bubbleIconView = null
         bubbleTextView = null
         bubbleSpinnerView = null
+        cachedCustomIconPath = null
+        cachedCustomIconDrawable = null
         OverlayRuntimeState.setRunning(false)
         serviceViewModelStore.clear()
         serviceScope.cancel()
@@ -256,9 +308,10 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.START or Gravity.TOP
-            x = 32
-            y = 360
+            // 悬浮球默认出现在屏幕右下角偏上位置，避免遮挡底部导航/手势区。
+            gravity = Gravity.END or Gravity.BOTTOM
+            x = (24f * resources.displayMetrics.density).roundToInt()
+            y = (170f * resources.displayMetrics.density).roundToInt()
         }
         bubbleParams = params
         val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
@@ -347,8 +400,18 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                             removeCallbacks(doubleTapTimeoutRunnable)
                         }
                         if (dragging) {
-                            params.x = startX + dx
-                            params.y = startY + dy
+                            // 悬浮球使用 Gravity.END or Gravity.BOTTOM：此时 params.x/y 是从屏幕
+                            // 右/下边缘量起的距离，直接加屏幕位移会让两个方向的移动**反向**。
+                            // 统一交给 windowOffsetDeltaFor 依据真实 gravity 换算（END/BOTTOM 取反，
+                            // START/TOP 保持正向），调用处不再对符号做二次反转。
+                            val delta = windowOffsetDeltaFor(
+                                screenDx = dx,
+                                screenDy = dy,
+                                anchoredToEnd = isAnchoredToScreenEnd(params.gravity),
+                                anchoredToBottom = isAnchoredToScreenBottom(params.gravity)
+                            )
+                            params.x = startX + delta.x
+                            params.y = startY + delta.y
                             windowManager.updateViewLayout(this, params)
                         }
                         true
@@ -473,7 +536,11 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                     WindowInsetsCompat.CONSUMED
                 }
                 setContent {
-                    `fun`.kirari.hanako.ui.theme.HanakoTheme {
+                    val panelSettings = overlayViewModel.uiState.value.settings
+                    `fun`.kirari.hanako.ui.theme.HanakoTheme(
+                        themeMode = panelSettings.themeMode,
+                        colorStyle = panelSettings.colorStyle
+                    ) {
                         OverlayPanel(
                             viewModel = overlayViewModel,
                             onDismiss = { overlayViewModel.closeSheet() },
@@ -699,7 +766,24 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         } else {
             textView?.visibility = View.GONE
             icon.visibility = View.VISIBLE
-            if (icon.tag != appearance.iconRes) {
+            // 自定义悬浮球图片：优先展示用户上传图标（不做 tint，保持原色）；
+            // 文件缺失/损坏时回退默认图标。
+            val customPath = overlayViewModel.uiState.value.settings.floatingBall.customIconPath
+            val customDrawable = if (customPath != null) {
+                if (cachedCustomIconPath != customPath) {
+                    cachedCustomIconDrawable = FloatingBallIconStore.loadDrawable(this, customPath)
+                    cachedCustomIconPath = customPath
+                }
+                cachedCustomIconDrawable
+            } else {
+                cachedCustomIconPath = null
+                cachedCustomIconDrawable = null
+                null
+            }
+            val targetTag = if (customDrawable != null) "custom:$customPath" else appearance.iconRes
+            val targetDrawable = customDrawable ?: ContextCompat.getDrawable(this, appearance.iconRes)
+            val targetTint = if (customDrawable != null) null else ColorStateList.valueOf(appearance.iconTint)
+            if (icon.tag != targetTag) {
                 icon.animate().cancel()
                 icon.animate()
                     .alpha(0f)
@@ -707,9 +791,9 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                     .scaleY(0.82f)
                     .setDuration(120L)
                     .withEndAction {
-                        icon.setImageDrawable(ContextCompat.getDrawable(this, appearance.iconRes))
-                        icon.imageTintList = ColorStateList.valueOf(appearance.iconTint)
-                        icon.tag = appearance.iconRes
+                        icon.setImageDrawable(targetDrawable)
+                        icon.imageTintList = targetTint
+                        icon.tag = targetTag
                         icon.animate()
                             .alpha(1f)
                             .scaleX(1f)
@@ -719,8 +803,8 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                     }
                     .start()
             } else {
-                icon.setImageDrawable(ContextCompat.getDrawable(this, appearance.iconRes))
-                icon.imageTintList = ColorStateList.valueOf(appearance.iconTint)
+                icon.setImageDrawable(targetDrawable)
+                icon.imageTintList = targetTint
                 icon.alpha = 1f
                 icon.scaleX = 1f
                 icon.scaleY = 1f
@@ -746,6 +830,196 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                     .start()
             }
         }
+    }
+
+    /**
+     * 截图开始：临时隐藏所有会遮挡被截内容的 Hanako 自有悬浮窗
+     * （悬浮球、分析面板及其把手、迷你聊天窗），避免它们出现在截图中污染 OCR。
+     *
+     * 用 [CaptureWindowVisibility] 记录每个窗口隐藏前的可见性，结束后按原状恢复：
+     * 截图前本就隐藏的窗口不会被强制显示，已关闭/已移除的窗口也不会被重新添加。
+     *
+     * 同时在 WindowManager 层把这些窗口的 `LayoutParams.alpha` 置 0（见 [captureWindowAlphaSnapshot]）：
+     * 只改 View 可见性不足以保证窗口不进入合成结果，窗口级 alpha 才是与是否重绘无关的可靠手段。
+     *
+     * **必须在主线程执行**（由 [CaptureUiGate] 的调用方经 `Dispatchers.Main.immediate` 保证）：
+     * View 的 visibility 与 WindowManager 布局参数都绑定在主线程的 ViewRootImpl 上。
+     * 两步都遵循「先记录原状、再改写」，任意一步中途失败都可由 [restoreHanakoWindowsAfterCapture] 回滚；
+     * 若隐藏后仍有窗口可见或 alpha 未能可靠置零，则主动抛异常中止本次截图，绝不冒险继续取帧。
+     */
+    private fun hideHanakoWindowsForCapture() {
+        // 步骤 0：先收起输入法软键盘。键盘是**独立于 Hanako 的窗口**，既不在 [hanakoCaptureWindows] 里，
+        // 也不会被位图遮罩覆盖；不收起就会随 Hanako 浮窗一起被拍进截图，并被 OCR 识别成题目内容
+        // （真机证据：OCR 结果里的 `GHI JKL MNO` / `PQRS TUV WXYZ`）。先记账、再收起，结束后按原状恢复。
+        hideImeForCapture()
+
+        val paramsByWindow = hanakoCaptureWindowParams()
+
+        // 步骤 1：把**窗口级 alpha** 置 0（WindowManager 属性，由系统合成阶段作用于整个窗口层）。
+        // 为什么必须在「View 可见性」之外补这一步（真机污染证据对应的根因）：
+        // 把窗口根 View 设为 GONE 时，ViewRootImpl 会直接跳过本次绘制
+        // （Android 15 源码 android/view/ViewRootImpl.java "Not drawing due to not visible"），
+        // 该窗口的 last buffer 不会被替换，画面是否真的从合成结果里消失完全取决于系统侧行为，
+        // 应用侧既无法保证也无法验证（原自检只回读同一个 View 标志，属于同义反复）。
+        // 窗口 alpha 由系统合成阶段生效，与缓冲新旧、是否重绘无关，
+        // 因此能确保该窗口层的画面不参与本次截图的合成。
+        // 逐个「先记录原值、再改写」，改写失败不静默吞掉（记录窗口与异常类型供诊断）。
+        captureWindowAlphaSnapshot.clear()
+        val alphaFailures = mutableListOf<String>()
+        var alphaApplied = 0
+        paramsByWindow.forEach { (view, params) ->
+            if (!view.isAttachedToWindow) return@forEach
+            captureWindowAlphaSnapshot[view] = params.alpha
+            params.alpha = 0f
+            try {
+                windowManager.updateViewLayout(view, params)
+                alphaApplied += 1
+            } catch (e: Exception) {
+                alphaFailures += "${view.javaClass.simpleName}:${e.javaClass.simpleName}"
+            }
+        }
+
+        // 步骤 2：View 可见性记账（先记录原状再改写；中途失败也会被恢复）。
+        val windows = hanakoCaptureWindows()
+        val hidden = captureWindowVisibility.hideAll(windows)
+        // 隐藏后立即复核：仍可见的窗口数必须为 0。
+        val stillVisible = windows.count { it.isAttachedToWindow && it.visibility == View.VISIBLE }
+        AppDebugLogStore.i(
+            logTag,
+            "Hanako windows hidden for capture thread=${Thread.currentThread().name} " +
+                "total=${windows.size} hidden=$hidden stillVisible=$stillVisible " +
+                "alphaApplied=$alphaApplied/${paramsByWindow.size} " +
+                "alphaFailures=${alphaFailures.ifEmpty { listOf("-") }}"
+        )
+        // 仍有窗口可见、或窗口级 alpha 未能可靠置零时，本次无法安全隐藏：
+        // 主动中止本次截图（调用方捕获后会立即回滚恢复），绝不带着「窗口可能进入截图」的风险继续取帧。
+        if (stillVisible > 0 || alphaFailures.isNotEmpty()) {
+            throw IllegalStateException(
+                "capture hide unsafe: stillVisible=$stillVisible alphaFailures=${alphaFailures.size}"
+            )
+        }
+    }
+
+    /**
+     * 截图结束（成功、失败或取消）：只把截图前可见的窗口恢复为可见，并还原窗口级 alpha 原值。
+     */
+    private fun restoreHanakoWindowsAfterCapture() {
+        val windows = hanakoCaptureWindows()
+        // 恢复前复核：截图期间应一直保持隐藏，若此处仍可见说明隐藏状态在截图过程中被破坏。
+        val hiddenBeforeRestore = windows.count { it.isAttachedToWindow && it.visibility != View.VISIBLE }
+        // 按记录的原始可见性逐个写回（不是无条件 VISIBLE）；返回实际完成恢复的窗口数。
+        val restored = captureWindowVisibility.restoreAll()
+
+        // 窗口级 alpha 恢复：按记录的原值精确还原（截图前本就 alpha=0 的窗口不会被强制显示）。
+        // 失败不静默吞掉（记录窗口与异常类型供诊断）。
+        val paramsByWindow = hanakoCaptureWindowParams()
+        var alphaRestored = 0
+        val alphaFailures = mutableListOf<String>()
+        captureWindowAlphaSnapshot.forEach { (view, alpha) ->
+            val params = paramsByWindow[view] ?: return@forEach
+            if (!view.isAttachedToWindow) return@forEach
+            params.alpha = alpha
+            try {
+                windowManager.updateViewLayout(view, params)
+                alphaRestored += 1
+            } catch (e: Exception) {
+                alphaFailures += "${view.javaClass.simpleName}:${e.javaClass.simpleName}"
+            }
+        }
+        captureWindowAlphaSnapshot.clear()
+
+        // 恢复输入法：仅在截图前键盘确实可见时尝试恢复显示（否则保持收起，避免凭空弹出键盘）。
+        val imeRestored = restoreImeAfterCapture()
+
+        // 恢复后逐窗复核最终状态（类名 / 可见性 / 是否附着），确认悬浮球与迷你窗各自回到截图前状态。
+        // 仅记录窗口自身状态，不记录任何屏幕文本内容。
+        val states = windows.joinToString(prefix = "[", postfix = "]") { view ->
+            "${view.javaClass.simpleName}(visibility=${view.visibility},attached=${view.isAttachedToWindow})"
+        }
+        AppDebugLogStore.i(
+            logTag,
+            "Hanako windows restored after capture thread=${Thread.currentThread().name} " +
+                "hiddenBeforeRestore=$hiddenBeforeRestore restored=$restored alphaRestored=$alphaRestored " +
+                "alphaFailures=${alphaFailures.ifEmpty { listOf("-") }} imeRestored=$imeRestored states=$states"
+        )
+    }
+
+    /** 截图前收起输入法软键盘：先记账（是否可见 + 持有焦点的窗口），再请求收起。 */
+    private fun hideImeForCapture() {
+        val windows = hanakoCaptureWindows().filter { it.isAttachedToWindow }
+        val target = windows.firstOrNull { it.hasWindowFocus() } ?: windows.firstOrNull()
+        imeTargetView = target
+        imeWasVisibleBeforeCapture = target?.let { isImeVisibleOn(it) } ?: false
+        if (target == null) return
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
+        imm.hideSoftInputFromWindow(target.windowToken, 0)
+    }
+
+    /** 输入法是否可见（按 androidx 兼容 API 读取窗口 insets，避免直接依赖 Android 10+ 的 WindowInsets.Type）。 */
+    private fun isImeVisibleOn(view: View): Boolean =
+        ViewCompat.getRootWindowInsets(view)?.isVisible(WindowInsetsCompat.Type.ime()) == true
+
+    /**
+     * 采集结束：截图前键盘可见则尝试恢复显示。
+     *
+     * 返回是否真正发起恢复（供诊断日志确认「已按记账恢复」）。恢复失败只记录、不抛出 ——
+     * 窗口可见性恢复是本方法的最高优先级，不能被输入法恢复的异常连累。
+     */
+    private fun restoreImeAfterCapture(): Boolean {
+        val target = imeTargetView
+        val wasVisible = imeWasVisibleBeforeCapture
+        imeTargetView = null
+        imeWasVisibleBeforeCapture = false
+        if (!wasVisible || target == null || !target.isAttachedToWindow) return false
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager ?: return false
+        return runCatching {
+            imm.showSoftInput(target, 0)
+        }.onFailure { AppDebugLogStore.w(logTag, "restore IME failed: ${it.javaClass.simpleName}") }.isSuccess
+    }
+
+    /** 全部参与截图遮挡规避的 Hanako 自有窗口。 */
+    private fun hanakoCaptureWindows(): List<View> =
+        listOfNotNull(bubbleView, panelView, panelHandleView, miniChatView)
+
+    /**
+     * Hanako 自有窗口的当前屏幕坐标矩形（供截图位图遮罩）。
+     *
+     * 只在主线程读取（`View.getLocationOnScreen` 绑定主线程；由采集侧经 `Dispatchers.Main.immediate`
+     * 调用）。未附着的窗口标记 `attached=false`，不参与遮罩，避免用陈旧矩形误遮真实题目区域。
+     */
+    private fun hanakoCaptureWindowFrames(): List<MaskWindow> =
+        hanakoCaptureWindows().map { view ->
+            if (!view.isAttachedToWindow) {
+                MaskWindow(WindowRect(0, 0, 0, 0), attached = false)
+            } else {
+                val location = IntArray(2)
+                view.getLocationOnScreen(location)
+                MaskWindow(
+                    WindowRect(
+                        location[0],
+                        location[1],
+                        location[0] + view.width,
+                        location[1] + view.height
+                    ),
+                    attached = true
+                )
+            }
+        }
+
+    /**
+     * 参与截图隐藏的窗口与其 `WindowManager.LayoutParams` 对应表。
+     *
+     * 以当前源码的真实窗口清单为准：悬浮球 [bubbleView]、分析面板 [panelView] 及其把手
+     * [panelHandleView]、迷你聊天窗 [miniChatView]；除此之外 OverlayService 不再向
+     * WindowManager 添加任何窗口，也没有独立 Popup / 次级 Overlay。
+     */
+    private fun hanakoCaptureWindowParams(): Map<View, WindowManager.LayoutParams> {
+        val map = LinkedHashMap<View, WindowManager.LayoutParams>()
+        bubbleView?.let { view -> bubbleParams?.let { map[view] = it } }
+        panelView?.let { view -> panelParams?.let { map[view] = it } }
+        panelHandleView?.let { view -> panelHandleParams?.let { map[view] = it } }
+        miniChatView?.let { view -> miniChatParams?.let { map[view] = it } }
+        return map
     }
 
     private fun dismissPanel() {
@@ -782,6 +1056,8 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
      */
     private fun showMiniChat() {
         if (miniChatView != null) return
+        // S2 触发点：显示迷你窗（首次主动唤醒）时按实时前台应用建立/重建会话绑定。
+        (application as? HanakoApplication)?.container?.bindTargetFromLiveForeground()
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
         windowManager.defaultDisplay.getRealMetrics(metrics)
@@ -815,14 +1091,22 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
             setViewTreeSavedStateRegistryOwner(this@OverlayService)
             setContent {
                 val miniProviders by overlayViewModel.providers.collectAsState()
-                `fun`.kirari.hanako.ui.theme.HanakoTheme {
+                val miniAlpha by overlayViewModel.miniChatAlpha.collectAsState()
+                val miniThemeMode by overlayViewModel.themeMode.collectAsState()
+                val miniColorStyle by overlayViewModel.colorStyle.collectAsState()
+                `fun`.kirari.hanako.ui.theme.HanakoTheme(
+                    themeMode = miniThemeMode,
+                    colorStyle = miniColorStyle
+                ) {
                     MiniChatPanel(
                         holder = overlayViewModel.chatSessionHolder,
                         providers = miniProviders,
                         catalog = overlayViewModel.chatModelCatalog,
+                        backgroundAlpha = miniAlpha,
                         onHeaderDrag = { dx, dy -> moveMiniChatBy(dx, dy) },
                         onOpenMainApp = { openMainChatAndHideMini() },
-                        onClose = { overlayViewModel.setMiniChatVisible(false) }
+                        onClose = { overlayViewModel.setMiniChatVisible(false) },
+                        onLongPressResize = { toggleMiniChatSize() }
                     )
                 }
             }
@@ -865,6 +1149,39 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         val params = miniChatParams ?: return
         params.x += dx.roundToInt()
         params.y += dy.roundToInt()
+        runCatching { windowManager.updateViewLayout(view, params) }
+    }
+
+    /**
+     * 长按迷你聊天窗：在小/大两种尺寸间切换（窗口中心保持不变，超屏回落）。
+     */
+    private fun toggleMiniChatSize() {
+        val view = miniChatView ?: return
+        val params = miniChatParams ?: return
+        view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        windowManager.defaultDisplay.getRealMetrics(metrics)
+        val density = resources.displayMetrics.density
+        val screenWidthPx = metrics.widthPixels
+        val screenHeightPx = metrics.heightPixels
+        val smallW = (300f * density).roundToInt()
+        val smallH = (400f * density).roundToInt()
+        val largeW = (440f * density).roundToInt()
+        val largeH = (600f * density).roundToInt()
+        val targetW = if (miniChatLarge) smallW else largeW
+        val targetH = if (miniChatLarge) smallH else largeH
+        val newW = targetW.coerceAtMost((screenWidthPx * 0.92f).roundToInt())
+        val newH = targetH.coerceAtMost((screenHeightPx * 0.82f).roundToInt())
+        // 保持窗口中心不偏移；超出屏幕时回落进屏幕内。
+        val centerX = params.x + params.width / 2
+        val centerY = params.y + params.height / 2
+        params.width = newW
+        params.height = newH
+        params.x = (centerX - newW / 2).coerceIn(0, (screenWidthPx - newW).coerceAtLeast(0))
+        params.y = (centerY - newH / 2).coerceIn(0, (screenHeightPx - newH).coerceAtLeast(0))
+        miniChatLarge = !miniChatLarge
+        AppDebugLogStore.d(logTag, "toggleMiniChatSize large=${miniChatLarge} w=${newW} h=${newH}")
         runCatching { windowManager.updateViewLayout(view, params) }
     }
 

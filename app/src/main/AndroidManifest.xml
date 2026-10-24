@@ -26,6 +26,16 @@
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+        <!-- 目标应用选择列表按 ACTION_MAIN + CATEGORY_LAUNCHER 枚举已安装可启动应用；
+             桌面（HOME）包名集合亦按 ACTION_MAIN + CATEGORY_HOME 解析。二者都需声明包可见性。 -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <application

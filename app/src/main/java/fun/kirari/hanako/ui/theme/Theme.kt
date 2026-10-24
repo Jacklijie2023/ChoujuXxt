@@ -14,6 +14,8 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import `fun`.kirari.hanako.data.ThemeColorStyle
+import `fun`.kirari.hanako.data.ThemeMode
 
 private val LightColorScheme = lightColorScheme(
     primary = HanakoLightPrimary,
@@ -37,20 +39,102 @@ private val DarkColorScheme = darkColorScheme(
     surfaceContainerLow = HanakoDarkSurfaceContainerLow
 )
 
+private fun lightColorSchemeFor(style: ThemeColorStyle) = when (style) {
+    ThemeColorStyle.DEFAULT -> LightColorScheme
+    ThemeColorStyle.PINK -> lightColorScheme(
+        primary = PinkLightPrimary,
+        onPrimary = PinkLightOnPrimary,
+        primaryContainer = PinkLightPrimaryContainer,
+        onPrimaryContainer = PinkLightOnPrimaryContainer,
+        secondaryContainer = PinkLightSecondaryContainer,
+        surface = PinkLightSurface,
+        surfaceContainer = PinkLightSurfaceContainer,
+        surfaceContainerLow = PinkLightSurfaceContainerLow
+    )
+    ThemeColorStyle.FOREST -> lightColorScheme(
+        primary = ForestLightPrimary,
+        onPrimary = ForestLightOnPrimary,
+        primaryContainer = ForestLightPrimaryContainer,
+        onPrimaryContainer = ForestLightOnPrimaryContainer,
+        secondaryContainer = ForestLightSecondaryContainer,
+        surface = ForestLightSurface,
+        surfaceContainer = ForestLightSurfaceContainer,
+        surfaceContainerLow = ForestLightSurfaceContainerLow
+    )
+    ThemeColorStyle.MIDNIGHT -> lightColorScheme(
+        primary = MidnightLightPrimary,
+        onPrimary = MidnightLightOnPrimary,
+        primaryContainer = MidnightLightPrimaryContainer,
+        onPrimaryContainer = MidnightLightOnPrimaryContainer,
+        secondaryContainer = MidnightLightSecondaryContainer,
+        surface = MidnightLightSurface,
+        surfaceContainer = MidnightLightSurfaceContainer,
+        surfaceContainerLow = MidnightLightSurfaceContainerLow
+    )
+}
+
+private fun darkColorSchemeFor(style: ThemeColorStyle) = when (style) {
+    ThemeColorStyle.DEFAULT -> DarkColorScheme
+    ThemeColorStyle.PINK -> darkColorScheme(
+        primary = PinkDarkPrimary,
+        onPrimary = PinkDarkOnPrimary,
+        primaryContainer = PinkDarkPrimaryContainer,
+        onPrimaryContainer = PinkDarkOnPrimaryContainer,
+        secondaryContainer = PinkDarkSecondaryContainer,
+        surface = PinkDarkSurface,
+        surfaceContainer = PinkDarkSurfaceContainer,
+        surfaceContainerLow = PinkDarkSurfaceContainerLow
+    )
+    ThemeColorStyle.FOREST -> darkColorScheme(
+        primary = ForestDarkPrimary,
+        onPrimary = ForestDarkOnPrimary,
+        primaryContainer = ForestDarkPrimaryContainer,
+        onPrimaryContainer = ForestDarkOnPrimaryContainer,
+        secondaryContainer = ForestDarkSecondaryContainer,
+        surface = ForestDarkSurface,
+        surfaceContainer = ForestDarkSurfaceContainer,
+        surfaceContainerLow = ForestDarkSurfaceContainerLow
+    )
+    ThemeColorStyle.MIDNIGHT -> darkColorScheme(
+        primary = MidnightDarkPrimary,
+        onPrimary = MidnightDarkOnPrimary,
+        primaryContainer = MidnightDarkPrimaryContainer,
+        onPrimaryContainer = MidnightDarkOnPrimaryContainer,
+        secondaryContainer = MidnightDarkSecondaryContainer,
+        surface = MidnightDarkSurface,
+        surfaceContainer = MidnightDarkSurfaceContainer,
+        surfaceContainerLow = MidnightDarkSurfaceContainerLow
+    )
+}
+
+/**
+ * Hanako 全局主题。
+ *
+ * @param themeMode 亮暗模式（跟随系统 / 白天 / 黑夜）。
+ * @param colorStyle 配色风格（默认 / 粉黛 / 森林 / 星空）。
+ * @param dynamicColor 默认风格下是否使用系统动态取色（Android 12+）。
+ */
 @Composable
 fun HanakoTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    themeMode: ThemeMode = ThemeMode.SYSTEM,
+    colorStyle: ThemeColorStyle = ThemeColorStyle.DEFAULT,
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit
 ) {
+    val darkTheme = when (themeMode) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
     val context = LocalContext.current
     val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+        // 仅默认风格支持系统动态取色；自定义配色风格强制使用预设色板。
+        dynamicColor && colorStyle == ThemeColorStyle.DEFAULT && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
 
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
+        darkTheme -> darkColorSchemeFor(colorStyle)
+        else -> lightColorSchemeFor(colorStyle)
     }
     val view = LocalView.current
     if (!view.isInEditMode) {

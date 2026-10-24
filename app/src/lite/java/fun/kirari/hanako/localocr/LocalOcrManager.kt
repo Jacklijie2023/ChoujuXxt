@@ -2,6 +2,7 @@ package `fun`.kirari.hanako.localocr
 
 import android.content.Context
 import android.graphics.Bitmap
+import `fun`.kirari.hanako.screencontext.OcrResult
 
 data class LocalOcrInstallStatus(
     val installed: Boolean,
@@ -20,7 +21,7 @@ class LocalOcrManager(@Suppress("UNUSED_PARAMETER") private val context: Context
         )
     }
 
-    suspend fun recognize(bitmap: Bitmap): String {
+    internal suspend fun recognize(bitmap: Bitmap): OcrResult {
         throw UnsupportedOperationException("Local OCR is not available in lite version")
     }
 }

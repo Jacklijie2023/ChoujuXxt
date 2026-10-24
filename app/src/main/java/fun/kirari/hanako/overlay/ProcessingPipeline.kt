@@ -24,6 +24,7 @@ import `fun`.kirari.hanako.network.LlmEvent
 import `fun`.kirari.hanako.network.ToolDef
 import `fun`.kirari.hanako.network.ToolRegistry
 import `fun`.kirari.hanako.network.UnifiedLLMClient
+import `fun`.kirari.hanako.screencontext.organizeOcrText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -123,7 +124,9 @@ internal class ProcessingPipeline(
 
     suspend fun runLocalOcr(bitmap: Bitmap): String {
         return withContext(Dispatchers.Default) {
-            localOcrManager.recognize(bitmap)
+            // 与实时互动链路一致：先取结构化结果，再按坐标恢复阅读顺序并关联选项，
+            // 而不是直接使用引擎返回顺序拼接的文本。
+            organizeOcrText(localOcrManager.recognize(bitmap)).text
         }
     }
 

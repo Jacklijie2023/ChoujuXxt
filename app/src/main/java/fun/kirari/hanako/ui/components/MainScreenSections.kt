@@ -67,8 +67,11 @@ fun HeroSection(
     hasOverlayPermission: Boolean,
     captureMethod: ScreenCaptureMethod,
     route: ProcessingRoute,
-    onSelectRoute: (ProcessingRoute) -> Unit,
+    realTimeMode: Boolean,
+    accessibilityEnabled: Boolean,
+    onSelectMode: (ProcessingRoute?) -> Unit,
     onOpenOverlayPermission: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
     onToggleOverlay: (Boolean) -> Unit,
     onStartAutoMode: () -> Unit,
     modifier: Modifier = Modifier
@@ -162,7 +165,7 @@ fun HeroSection(
                 }
             }
 
-            // 工作模式区域 (替换掉原本丑陋的 SegmentedButtonRow)
+            // 工作模式区域
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     "工作模式",
@@ -171,8 +174,18 @@ fun HeroSection(
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
                 )
 
+                // 第一行：实时互动（自动绑定当前前台应用，无需预先选择目标应用）
+                ModeSelectorItem(
+                    modifier = Modifier.fillMaxWidth(),
+                    title = "实时互动",
+                    subtitle = "自动识别当前屏幕题目并作答，无需预先选择应用",
+                    icon = Icons.Default.PlayArrow,
+                    isSelected = realTimeMode,
+                    onClick = { onSelectMode(null) }
+                )
+
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    // 第一行：OCR 和多模态
+                    // 第二行：OCR 和多模态
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -182,27 +195,63 @@ fun HeroSection(
                             title = "OCR 模式",
                             subtitle = "截屏+OCR 提取文字后分析",
                             icon = Icons.Default.Language,
-                            isSelected = route == ProcessingRoute.OCR_THEN_LLM,
-                            onClick = { onSelectRoute(ProcessingRoute.OCR_THEN_LLM) }
+                            isSelected = !realTimeMode && route == ProcessingRoute.OCR_THEN_LLM,
+                            onClick = { onSelectMode(ProcessingRoute.OCR_THEN_LLM) }
                         )
                         ModeSelectorItem(
                             modifier = Modifier.weight(1f),
                             title = "多模态视觉",
                             subtitle = "截屏后直接送视觉模型",
                             icon = Icons.Default.AutoAwesome,
-                            isSelected = route == ProcessingRoute.MULTIMODAL_DIRECT,
-                            onClick = { onSelectRoute(ProcessingRoute.MULTIMODAL_DIRECT) }
+                            isSelected = !realTimeMode && route == ProcessingRoute.MULTIMODAL_DIRECT,
+                            onClick = { onSelectMode(ProcessingRoute.MULTIMODAL_DIRECT) }
                         )
                     }
-                    // 第二行：无障碍模式
+                    // 第三行：无障碍模式
                     ModeSelectorItem(
                         modifier = Modifier.fillMaxWidth(),
                         title = "无障碍提取",
                         subtitle = "无需截屏，直接从屏幕 UI 节点提取文本",
                         icon = Icons.Default.AccessibilityNew,
-                        isSelected = route == ProcessingRoute.ACCESSIBILITY_TEXT,
-                        onClick = { onSelectRoute(ProcessingRoute.ACCESSIBILITY_TEXT) }
+                        isSelected = !realTimeMode && route == ProcessingRoute.ACCESSIBILITY_TEXT,
+                        onClick = { onSelectMode(ProcessingRoute.ACCESSIBILITY_TEXT) }
                     )
+                }
+
+                // 实时互动依赖无障碍服务：未开启时给出明确指引，避免用户误以为已生效。
+                if (realTimeMode && !accessibilityEnabled) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Text(
+                                "实时互动需要无障碍服务",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                "去开启",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.clickable { onOpenAccessibilitySettings() }
+                            )
+                        }
+                    }
                 }
             }
 

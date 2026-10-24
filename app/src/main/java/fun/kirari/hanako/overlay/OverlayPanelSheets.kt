@@ -1,6 +1,7 @@
 package `fun`.kirari.hanako.overlay
 
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.widget.Toast
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
@@ -9,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Column
@@ -28,6 +30,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -39,8 +43,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,7 +87,9 @@ import `fun`.kirari.hanako.data.resolveModelProvider
 import `fun`.kirari.hanako.ui.components.ModelPickerListContent
 import `fun`.kirari.hanako.ui.components.ModelPickerSurfaceItem
 import `fun`.kirari.hanako.ui.components.rememberModelPickerState
+import `fun`.kirari.hanako.ui.ReadingSpeakerIcon
 import `fun`.kirari.hanako.ui.cropBitmap
+import `fun`.kirari.hanako.ui.cropRectOf
 import `fun`.kirari.hanako.util.HapticHelper
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -91,6 +99,10 @@ internal fun CropOverlaySheet(
     uiState: OverlayUiState,
     onClose: () -> Unit,
     onConfirm: (Bitmap) -> Unit,
+    /** 「长截图」：把当前这一屏（按用户框选区域裁剪）记为第 1 屏，收起面板让用户手动滚动。 */
+    onStartLong: (Rect?) -> Unit,
+    /** 「继续截图」：收起面板回到目标页面，等用户再次点击悬浮球截下一屏。 */
+    onContinueLong: () -> Unit,
     panelHeightPx: Int,
     modelPickerTarget: ModelPurpose?,
     onModelPickerTargetChange: (ModelPurpose?) -> Unit,
@@ -155,12 +167,48 @@ internal fun CropOverlaySheet(
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             ) {
+                val panelScroll = rememberScrollState()
+                val longBitmap = uiState.longScreenshotBitmap.takeIf { uiState.longCaptureActive }
+                // 默认滚到最底部：面板看起来和第一次截图时一模一样。
+                // 只有用户向上滚动，才会露出位于 OCR 模式行上方的「原图」区域。
+                LaunchedEffect(panelScroll.maxValue, longBitmap) {
+                    if (longBitmap != null) panelScroll.scrollTo(panelScroll.maxValue)
+                }
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(start = 20.dp, top = 52.dp, end = 20.dp, bottom = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                        .verticalScroll(panelScroll)
                 ) {
+                    if (longBitmap != null) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 20.dp, top = 16.dp, end = 20.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "原图 · 已拼接 ${uiState.longCapturePages} 屏（向下滚动回截图页）",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Image(
+                                bitmap = longBitmap.asImageBitmap(),
+                                contentDescription = "原图",
+                                contentScale = ContentScale.FillWidth,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(longBitmap.width.toFloat() / longBitmap.height.toFloat())
+                                    .clip(RoundedCornerShape(18.dp))
+                            )
+                        }
+                    }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(panelMaxHeight)
+                            .padding(start = 20.dp, top = 52.dp, end = 20.dp, bottom = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
                     CropHeaderRow(
                         assistantName = selectedAssistant?.name.orEmpty(),
                         hasMultipleAssistants = uiState.settings.assistants.size > 1,
@@ -288,18 +336,46 @@ internal fun CropOverlaySheet(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        // 长截图改为「用户自己滚动、每点一次悬浮球截一屏」的手动拼接：
+                        // 会话中显示「继续截图」，否则显示「长截图」开始会话。
+                        OutlinedButton(
+                            onClick = {
+                                HapticHelper.mediumTap()
+                                if (uiState.longCaptureActive) {
+                                    onContinueLong()
+                                } else {
+                                    // 把用户在预览里的框选换算成原图坐标，长截图只拼这条区域。
+                                    val rect = bitmap?.let {
+                                        cropRectOf(it.width, it.height, cropStart, cropEnd, canvasSize)
+                                    }
+                                    onStartLong(rect)
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = bitmap != null && uiState.working.not()
+                        ) {
+                            Text(if (uiState.longCaptureActive) "继续截图" else "长截图")
+                        }
                         Button(
                             onClick = {
                                 HapticHelper.mediumTap()
-                                bitmap?.let {
-                                    onConfirm(cropBitmap(it, cropStart, cropEnd, canvasSize))
+                                // 长截图：分析的是「原图」区域里的累计长图（不做逐像素框选）；
+                                // 普通截图：按用户框选区域裁剪后发送。
+                                if (uiState.longCaptureActive) {
+                                    uiState.longScreenshotBitmap?.let(onConfirm)
+                                } else {
+                                    bitmap?.let {
+                                        onConfirm(cropBitmap(it, cropStart, cropEnd, canvasSize))
+                                    }
                                 }
                             },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = bitmap != null && hasSelection
+                            modifier = Modifier.weight(1f),
+                            enabled = (if (uiState.longCaptureActive) uiState.longScreenshotBitmap else bitmap) != null &&
+                                uiState.working.not()
                         ) {
                             Text("确认处理")
                         }
+                    }
                     }
                 }
             }
@@ -423,6 +499,9 @@ internal fun CropOverlaySheet(
     }
 }
 
+/** 分析页「答案」模块朗读标记：与聊天页共用 TtsHelper 朗读状态，用于识别当前是否在朗读本面板内容。 */
+private const val ANSWER_SPEECH_ID = "overlay_answer_speech"
+
 @Composable
 internal fun ResultOverlaySheet(
     uiState: OverlayUiState,
@@ -434,6 +513,19 @@ internal fun ResultOverlaySheet(
     val context = LocalContext.current
     val scrollState = rememberScrollState()
     val answerText = uiState.liveAnswerText
+    // 朗读共享状态：分析页「答案」模块与聊天页共用同一 TTS 引擎（TtsHelper）与朗读状态。
+    val readingMessageId by TtsHelper.readingMessageId.collectAsState()
+    // 幂等补充初始化（AppContainer 启动时已初始化）；面板退出组合时若在朗读本面板内容则停止。
+    DisposableEffect(Unit) {
+        TtsHelper.init(context)
+        onDispose {
+            if (TtsHelper.readingMessageId.value == ANSWER_SPEECH_ID) TtsHelper.stop()
+        }
+    }
+    // 新一轮分析开始时停止朗读旧答案，避免朗读已过期的内容。
+    LaunchedEffect(uiState.working) {
+        if (uiState.working && TtsHelper.readingMessageId.value == ANSWER_SPEECH_ID) TtsHelper.stop()
+    }
     // 滚动位置变化会触发重组，从而同步面板宿主的拦截开关。
     val contentAtTop = scrollState.value <= 0
     SideEffect { contentAtTopChange(contentAtTop) }
@@ -519,15 +611,61 @@ internal fun ResultOverlaySheet(
                             }
                         }
                     }
+                    // 「完整材料和题目」：把 OCR 原文过滤成 材料 → 题干 → 选项，
+                    // 按刷题 App 的题面布局展示，方便核对模型答案是否对应这道原题。
+                    val extractedQuestion = remember(uiState.liveOcrText) {
+                        QuestionExtractor.extract(uiState.liveOcrText)
+                    }
+                    if (extractedQuestion.hasContent) {
+                        // 与「OCR 结果」使用同一个渲染器，字体颜色、行距保持一致。
+                        val questionText = buildString {
+                            extractedQuestion.material.forEach {
+                                append(it)
+                                append("\n\n")
+                            }
+                            if (extractedQuestion.stem.isNotBlank()) {
+                                append(extractedQuestion.stem)
+                                append("\n\n")
+                            }
+                            extractedQuestion.options.forEach {
+                                append("${it.label}. ${it.text}")
+                                append("\n\n")
+                            }
+                        }.trim()
+                        ResultCard(
+                            title = "完整材料和题目",
+                            actions = {
+                                SmallHeaderAction(
+                                    label = "复制",
+                                    onClick = {
+                                        copyToClipboardWithToast(context, "Hanako 题目", questionText, "已复制题目与选项")
+                                    }
+                                )
+                            }
+                        ) {
+                            MarkdownLatexText(
+                                content = questionText,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
                     ResultCard(
                         title = "答案",
                         actions = {
                             if (!uiState.working && answerText.isNotBlank()) {
+                                // 朗读按钮（复制左边）：与聊天页朗读交互一致（点击朗读、再次点击停止、朗读中显示声波动画）。
+                                val isReading = readingMessageId == ANSWER_SPEECH_ID
+                                SmallHeaderSpeak(
+                                    isReading = isReading,
+                                    onClick = {
+                                        if (isReading) TtsHelper.stop() else TtsHelper.speak(answerText, ANSWER_SPEECH_ID)
+                                    }
+                                )
                                 SmallHeaderAction(
                                     label = "复制",
-                                onClick = {
-                                    copyToClipboardWithToast(context, "Hanako 原始答案", answerText, "已复制全文")
-                                }
+                                    onClick = {
+                                        copyToClipboardWithToast(context, "Hanako 原始答案", answerText, "已复制全文")
+                                    }
                                 )
                             }
                         }
@@ -1012,6 +1150,45 @@ private fun SmallHeaderAction(
         style = MaterialTheme.typography.labelMedium,
         color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
     )
+}
+
+/** 答案模块的朗读按钮：样式与「复制」一致（圆角胶囊），朗读中显示与聊天页相同的声波动画。 */
+@Composable
+private fun SmallHeaderSpeak(
+    isReading: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(
+                if (isReading) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHighest
+                }
+            )
+            .clickable {
+                HapticHelper.lightTap()
+                onClick()
+            }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (isReading) {
+            ReadingSpeakerIcon(
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+        } else {
+            Icon(
+                Icons.Default.VolumeUp,
+                contentDescription = "朗读答案",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
 }
 
 @Composable

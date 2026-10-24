@@ -87,6 +87,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import android.widget.Toast
 import `fun`.kirari.hanako.BuildConfig
+import `fun`.kirari.hanako.accessibility.HanakoAccessibilityService
 import `fun`.kirari.hanako.capture.ProjectionPermissionActivity
 import `fun`.kirari.hanako.capture.ScreenCaptureManager
 import `fun`.kirari.hanako.capture.ScreenCaptureStartResult
@@ -125,6 +126,7 @@ private const val ROUTE_SETTINGS_MODEL = "settings_model"
 private const val ROUTE_SETTINGS_ASSISTANT = "settings_assistant"
 private const val ROUTE_SETTINGS_ASSISTANT_DETAIL = "settings_assistant_detail"
 private const val ROUTE_SETTINGS_MORE = "settings_more"
+private const val ROUTE_SETTINGS_APPEARANCE = "settings_appearance"
 private const val ROUTE_SETTINGS_DEBUG_LOGS = "settings_debug_logs"
 private const val ARG_PROVIDER_ID = "providerId"
 private const val ARG_ASSISTANT_ID = "assistantId"
@@ -142,6 +144,7 @@ private fun appTitle(route: String?, currentScreen: Screen): String = when (rout
     ROUTE_SETTINGS_MODEL -> "模型设置"
     ROUTE_SETTINGS_ASSISTANT -> "助手配置"
     ROUTE_SETTINGS_MORE -> "更多"
+    ROUTE_SETTINGS_APPEARANCE -> "外观与交互"
     ROUTE_SETTINGS_DEBUG_LOGS -> "调试日志"
     null -> currentScreen.title
     else -> when {
@@ -157,9 +160,15 @@ private fun appTitle(route: String?, currentScreen: Screen): String = when (rout
 fun HanakoApp(viewModel: MainViewModel) {
     val settings by viewModel.settings.collectAsState()
     val debugEntries by AppDebugLogStore.entries.collectAsState()
+    // R7：目标应用绑定模式与已绑定包名（设置页展示）。
+    val targetAppMode by viewModel.targetAppMode.collectAsState()
+    val boundTargetPackage by viewModel.boundTargetPackage.collectAsState()
     val context = LocalContext.current
     val overlayEnabled by OverlayRuntimeState.running.collectAsState()
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var accessibilityEnabled by remember {
+        mutableStateOf(HanakoAccessibilityService.isServiceEnabled(context))
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     var providerModelsPreviewId by remember { mutableStateOf<String?>(null) }
     var modelPickerTarget by remember { mutableStateOf<ModelPurpose?>(null) }
@@ -202,6 +211,7 @@ fun HanakoApp(viewModel: MainViewModel) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 hasOverlayPermission = Settings.canDrawOverlays(context)
+                accessibilityEnabled = HanakoAccessibilityService.isServiceEnabled(context)
             }
         }
 
@@ -327,6 +337,7 @@ fun HanakoApp(viewModel: MainViewModel) {
                                 settings = settings,
                                 overlayEnabled = overlayEnabled,
                                 hasOverlayPermission = hasOverlayPermission,
+                                accessibilityEnabled = accessibilityEnabled,
                                 onOpenOverlayPermission = {
                                     context.startActivity(
                                         Intent(
@@ -334,6 +345,9 @@ fun HanakoApp(viewModel: MainViewModel) {
                                             Uri.parse("package:${context.packageName}")
                                         )
                                     )
+                                },
+                                onOpenAccessibilitySettings = {
+                                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                                 },
                                 onToggleOverlay = { enabled ->
                                     if (enabled) {
@@ -357,7 +371,7 @@ fun HanakoApp(viewModel: MainViewModel) {
                                         ScreenCaptureManager.stop(context, settings.screenCaptureMethod)
                                     }
                                 },
-                                onSelectRoute = viewModel::setRoute,
+                                onSelectMode = viewModel::selectHomeMode,
                                 onOpenHistory = { navController.navigate(ROUTE_HANAKO_HISTORY) }
                             )
                         },
@@ -377,6 +391,7 @@ fun HanakoApp(viewModel: MainViewModel) {
                                 onNavigateModel = { navController.navigate(ROUTE_SETTINGS_MODEL) },
                                 onNavigateAssistant = { navController.navigate(ROUTE_SETTINGS_ASSISTANT) },
                                 onNavigateMore = { navController.navigate(ROUTE_SETTINGS_MORE) },
+                                onNavigateAppearance = { navController.navigate(ROUTE_SETTINGS_APPEARANCE) },
                                 onNavigateDebugLogs = { navController.navigate(ROUTE_SETTINGS_DEBUG_LOGS) }
                             )
                         }
@@ -470,6 +485,29 @@ fun HanakoApp(viewModel: MainViewModel) {
                             }
                         },
                         onToggleTrustAllHttpsCertificates = viewModel::setTrustAllHttpsCertificates
+                    )
+                }
+                composable(ROUTE_SETTINGS_APPEARANCE) {
+                    AppearanceSettingsScreen(
+                        floatingBall = settings.floatingBall,
+                        miniChat = settings.miniChat,
+                        themeMode = settings.themeMode,
+                        colorStyle = settings.colorStyle,
+                        ttsVoiceName = settings.ttsVoiceName,
+                        realTimeMode = settings.realTimeMode,
+                        targetAppPackage = settings.targetAppPackage,
+                        targetAppMode = targetAppMode,
+                        boundTargetPackage = boundTargetPackage,
+                        onSetFloatingBallCustomIcon = viewModel::setFloatingBallCustomIcon,
+                        onSetMiniChatAlpha = viewModel::setMiniChatAlpha,
+                        onSetThemeMode = viewModel::setThemeMode,
+                        onSetColorStyle = viewModel::setColorStyle,
+                        onSetTtsVoiceName = viewModel::setTtsVoiceName,
+                        onSetRealTimeMode = viewModel::setRealTimeMode,
+                        onSetTargetAppPackage = viewModel::setTargetAppPackage,
+                        onSetTargetAppMode = viewModel::setTargetAppMode,
+                        onRebindToForeground = { viewModel.bindTargetToForegroundNow() },
+                        onRebindToManual = { viewModel.rebindTargetNow() }
                     )
                 }
                 composable(ROUTE_SETTINGS_DEBUG_LOGS) {
@@ -812,9 +850,11 @@ private fun HanakoHomeScreen(
     settings: `fun`.kirari.hanako.data.AppSettings,
     overlayEnabled: Boolean,
     hasOverlayPermission: Boolean,
+    accessibilityEnabled: Boolean,
     onOpenOverlayPermission: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
     onToggleOverlay: (Boolean) -> Unit,
-    onSelectRoute: (`fun`.kirari.hanako.data.ProcessingRoute) -> Unit,
+    onSelectMode: (`fun`.kirari.hanako.data.ProcessingRoute?) -> Unit,
     onOpenHistory: () -> Unit
 ) {
     val context = LocalContext.current
@@ -829,8 +869,11 @@ private fun HanakoHomeScreen(
                 hasOverlayPermission = hasOverlayPermission,
                 captureMethod = settings.screenCaptureMethod,
                 route = settings.processingRoute,
-                onSelectRoute = onSelectRoute,
+                realTimeMode = settings.realTimeMode,
+                accessibilityEnabled = accessibilityEnabled,
+                onSelectMode = onSelectMode,
                 onOpenOverlayPermission = onOpenOverlayPermission,
+                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                 onToggleOverlay = onToggleOverlay,
                 onStartAutoMode = {
                     if (!hasOverlayPermission) return@HeroSection

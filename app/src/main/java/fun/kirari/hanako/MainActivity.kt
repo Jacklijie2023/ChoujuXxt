@@ -7,6 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import `fun`.kirari.hanako.overlay.EXTRA_OPEN_CHAT
 import `fun`.kirari.hanako.ui.HanakoApp
 import `fun`.kirari.hanako.ui.MainViewModel
@@ -25,7 +27,11 @@ class MainActivity : ComponentActivity() {
             defaultHandler?.uncaughtException(thread, throwable)
         }
         setContent {
-            HanakoTheme {
+            val settings by viewModel.settings.collectAsState()
+            HanakoTheme(
+                themeMode = settings.themeMode,
+                colorStyle = settings.colorStyle
+            ) {
                 HanakoApp(viewModel)
             }
         }

@@ -68,6 +68,7 @@ internal class OpenAiResponsesAdapter(
 
         sseClient.stream(
             request = baseRequest(request.provider, "${request.provider.baseUrl.trimEnd('/')}/responses", payload, json, mediaType),
+            traceId = request.traceId,
             firstDeltaTimeoutMillis = request.firstDeltaTimeoutMillis,
             onEvent = { _, type, _, data ->
                 if (data == "[DONE]") return@stream SseStreamClient.StreamEventResult(done = true)

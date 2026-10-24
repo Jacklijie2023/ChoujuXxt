@@ -192,6 +192,15 @@ internal fun anthropicTextDelta(text: String, index: Int = 0): String =
 internal fun openAiTextDelta(text: String): String =
     "data: {\"choices\":[{\"delta\":{\"content\":\"$text\"}}]}\n\n"
 
+/**
+ * 构造一条 OpenAI 兼容的 SSE 推理内容增量事件（`reasoning_content`，无正文 `content`）。
+ *
+ * 用于模拟推理模型 / 部分中转站「先持续下发推理内容、正文迟迟不出现」的真实流形态：
+ * 服务端确实在输出、事件确实在到达，但没有任何可展示的正文片段。
+ */
+internal fun openAiReasoningDelta(text: String): String =
+    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"$text\"}}]}\n\n"
+
 /** 构造一条 Anthropic Messages 的 message_stop 正常结束事件。 */
 internal fun anthropicMessageStop(): String =
     "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
