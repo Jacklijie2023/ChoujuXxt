@@ -600,7 +600,7 @@ private fun PhotoGrid(
  * 主界面「+」面板层级 0 的照片条（图 3/5）：不展示相册分类标题，仅 2 行照片；
  * 点一下照片 → [onAdd] 把它加入输入框顶部附件区（已加入的显示勾选）；
  * 向上拖动（不滚动）达阈值后回调 [onPullUp] 打开全屏相册页。
- */
+  */
 @Composable
 private fun DragUpPhotoStrip(
     photos: List<PhonePhoto>,
@@ -906,7 +906,7 @@ internal fun AlbumPickerOverlay(
                                 onClick = {
                                     selectedAlbum = null
                                     menuOpen = false
-                                }
+                                } 
                             )
                             albumInfos.forEach { album ->
                                 AlbumInfoRow(

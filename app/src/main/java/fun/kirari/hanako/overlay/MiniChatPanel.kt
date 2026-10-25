@@ -118,6 +118,7 @@ private const val REALTIME_STATUS_REFRESH_MILLIS = 1_000L
  * @param onOpenMainApp 点击「打开」跳转主 App 聊天页。
  * @param onClose 关闭迷你小窗。
  * @param onLongPressResize 长按迷你聊天窗，在 OverlayService 侧切换小/大窗口尺寸。
+ * @param pageContext 发送时附带的当前页面上下文（分析页内容）；返回 null/空白表示普通聊天。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -130,6 +131,7 @@ internal fun MiniChatPanel(
     onOpenMainApp: () -> Unit,
     onClose: () -> Unit,
     onLongPressResize: () -> Unit = {},
+    pageContext: (() -> String?)? = null,
     modifier: Modifier = Modifier
 ) {
     val resizeInteractionSource = remember { MutableInteractionSource() }
@@ -490,7 +492,8 @@ internal fun MiniChatPanel(
                                                 }
                                                 encoded to ChatImageStore.saveAll(context, encoded)
                                             }
-                                            holder.send(text, encoded, imagePaths)
+                                            // 分析页「继续追问」/迷你窗场景额外携带当前处理页内容作为上下文。
+                                            holder.send(text, encoded, imagePaths, pageContext?.invoke())
                                         }
                                     },
                                     enabled = input.isNotBlank() || imageAttachments.isNotEmpty()

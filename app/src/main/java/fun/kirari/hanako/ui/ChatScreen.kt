@@ -113,6 +113,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -165,6 +166,16 @@ internal fun ChatScreen(
     catalog: ChatModelCatalog,
     isActive: Boolean = true,
     onRevealNavBar: () -> Unit = {},
+    /** 是否应用状态栏内边距：嵌入悬浮窗（无状态栏遮挡）时为 false。 */
+    applyStatusBarPadding: Boolean = true,
+    /** 是否应用输入法内边距：悬浮窗宿主改用窗口整体上移（adjustPan）时为 false。 */
+    applyImePadding: Boolean = true,
+    /** 输入区底部内边距：悬浮窗内嵌场景可压小，缩小输入框与键盘之间的空白。 */
+    inputBottomPadding: Dp = 8.dp,
+    /** 输入区顶部内边距：悬浮窗内嵌场景可压小，把高度让给消息区。 */
+    inputTopPadding: Dp = 8.dp,
+    /** 发送时附带的当前页面上下文（嵌入分析页「继续追问」时由结果页提供）。 */
+    contextProvider: (() -> String?)? = null,
     modifier: Modifier = Modifier
 ) {
     val session by holder.session.collectAsState()
@@ -178,6 +189,10 @@ internal fun ChatScreen(
     val listState = rememberLazyListState()
     // 历史抽屉开关：用普通 remember（非 rememberSaveable），避免「已展开」状态跨 Tab 被恢复。
     var showDrawer by remember { mutableStateOf(false) }
+    // 悬浮窗内嵌宿主（无 Activity token）：不能用 ModalBottomSheet / Dialog 等新建窗口的弹层，
+    // 否则点击模型胶囊会抛 BadTokenException。此时「聊天设置」改为窗口内覆盖渲染。
+    val overlaySafe = !applyStatusBarPadding
+    var showChatSettings by remember { mutableStateOf(false) }
     val context = LocalContext.current
     // 用于「点击空白处收起键盘」以及「打开 + 面板时收起键盘」。
     val focusManager = LocalFocusManager.current
@@ -403,14 +418,15 @@ internal fun ChatScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .statusBarsPadding()
+                .then(if (applyStatusBarPadding) Modifier.statusBarsPadding() else Modifier)
         ) {
             // 轻量顶栏（无分隔线）：侧边栏 / 模型切换 / 新建对话。
             // 顶栏空白处同样属于「非功能区域」：点击自动收起键盘与「+」功能面板。
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                    // 悬浮窗内嵌宿主（overlaySafe）纵向内边距压到 2dp，把高度让给消息区。
+                    .padding(horizontal = 8.dp, vertical = if (overlaySafe) 2.dp else 6.dp)
                     .pointerInput(Unit) {
                         detectTapGestures {
                             focusManager.clearFocus()
@@ -427,7 +443,9 @@ internal fun ChatScreen(
                     holder = holder,
                     providers = providers,
                     catalog = catalog,
-                    modifier = Modifier.weight(1f, fill = false)
+                    modifier = Modifier.weight(1f, fill = false),
+                    // 悬浮窗内嵌宿主交给本页窗口内覆盖渲染，避免 ModalBottomSheet 新建窗口闪退。
+                    onOpenSettings = if (overlaySafe) ({ showChatSettings = true }) else null
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 // 右上角「自动朗读」开关：开启后每次回复完成自动朗读该回复；关闭态显示划掉喇叭。
@@ -509,8 +527,14 @@ internal fun ChatScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .imePadding()
+                    // 上下内边距按宿主传入值走：悬浮窗内嵌时压到最小，把高度让给消息区。
+                    .padding(
+                        start = 12.dp,
+                        top = inputTopPadding,
+                        end = 12.dp,
+                        bottom = inputBottomPadding
+                    )
+                    .then(if (applyImePadding) Modifier.imePadding() else Modifier)
             ) {
                 val plusRotation by animateFloatAsState(
                     targetValue = if (panelExpanded) 45f else 0f,
@@ -532,7 +556,7 @@ internal fun ChatScreen(
                                     .mapNotNull { ChatImageStore.encodeUri(context, it.uri) }
                                 encoded to ChatImageStore.saveAll(context, encoded)
                             }
-                            holder.send(text, encoded, imagePaths)
+                            holder.send(text, encoded, imagePaths, contextProvider?.invoke())
                         }
                     }
                 }
@@ -896,9 +920,45 @@ internal fun ChatScreen(
                             onNew = {
                                 holder.newSession()
                                 showDrawer = false
-                            }
+                            },
+                            overlaySafe = overlaySafe
                         )
                     }
+                }
+            }
+        }
+
+        // 模型胶囊 → 「聊天设置」：overlaySafe 宿主窗口内覆盖渲染（与迷你聊天窗一致，
+        // 不打开 ModalBottomSheet，避免 WindowManager$BadTokenException）。
+        if (overlaySafe && showChatSettings) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 4.dp, top = 4.dp, end = 12.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { showChatSettings = false }) {
+                            Icon(Icons.Default.Close, contentDescription = "关闭聊天设置")
+                        }
+                        Text(
+                            text = "聊天设置",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    ChatSettingsContent(
+                        holder = holder,
+                        providers = providers,
+                        catalog = catalog,
+                        onDismiss = { showChatSettings = false },
+                        showTitle = false
+                    )
                 }
             }
         }

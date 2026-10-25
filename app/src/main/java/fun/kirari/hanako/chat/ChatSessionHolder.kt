@@ -235,11 +235,14 @@ internal class ChatSessionHolder(
      * 发送一条用户消息（可附带图片 base64）并开始流式回复。
      *
      * @param imagePaths 本次发送图片的本地副本路径（仅用于气泡回显，不参与模型上下文）。
+     * @param contextText 调用方显式提供的当前页面上下文（分析页「继续追问」/迷你窗读取当前处理页内容）。
+     *   非空时直接注入本次请求，不再另行读取屏幕；null/blank 时走既有屏幕感知链路。
      */
     fun send(
         text: String,
         imagesBase64: List<String> = emptyList(),
-        imagePaths: List<String> = emptyList()
+        imagePaths: List<String> = emptyList(),
+        contextText: String? = null
     ) {
         val prompt = text.trim()
         // 允许「仅发送图片、不带文字」。
@@ -269,7 +272,7 @@ internal class ChatSessionHolder(
             }
         }
         logImageSend(userMessageId, imagesBase64.size, imagePaths)
-        startStream(sessionId, userMessageId, prompt, imagesBase64)
+        startStream(sessionId, userMessageId, prompt, imagesBase64, contextText = contextText)
     }
 
     /** 仅记录图片数量与回显路径数量，便于真机核对气泡回显链路；不记录聊天正文。 */
@@ -515,7 +518,9 @@ internal class ChatSessionHolder(
         userMessageId: String,
         instruction: String,
         imagesBase64: List<String> = emptyList(),
-        reuseBoundRequest: Boolean = false
+        reuseBoundRequest: Boolean = false,
+        /** 调用方显式提供的页面上下文；非空时直接注入，绕过屏幕读取。 */
+        contextText: String? = null
     ) {
         val config = configProvider()
         val session = _state.value.sessions.firstOrNull { it.id == sessionId } ?: return
@@ -550,9 +555,25 @@ internal class ChatSessionHolder(
                     boundRequest?.takeIf { it.userMessageId == userMessageId }
                         ?: BoundRequest(userMessageId, instruction, false, null, null)
                 } else {
-                    resolveBoundRequest(assistantId, userMessageId, instruction).also {
-                        boundRequest = it
-                    }
+                    val explicitContext = contextText?.takeIf { it.isNotBlank() }
+                    if (explicitContext != null) {
+                        // 显式上下文（分析页「继续追问」/迷你窗）：页面内容由调用方提供，
+                        // 直接按注入语义组装 prompt，不再触发屏幕读取。
+                        traceLogger?.invoke(
+                            "trace=$assistantId context-explicit source=overlay_result " +
+                                "chars=${explicitContext.length}"
+                        )
+                        BoundRequest(
+                            userMessageId = userMessageId,
+                            prompt = buildInjectedPrompt(instruction, explicitContext),
+                            hadContext = true,
+                            questionText = explicitContext,
+                            failureReason = null,
+                            source = "overlay_result"
+                        )
+                    } else {
+                        resolveBoundRequest(assistantId, userMessageId, instruction)
+                    }.also { boundRequest = it }
                 }
 
                 // 上下文不可用：不发起模型请求，以失败提示消息回应，终态 Failed。

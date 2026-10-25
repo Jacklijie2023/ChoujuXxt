@@ -410,7 +410,13 @@ fun HanakoApp(viewModel: MainViewModel) {
                 composable("$ROUTE_HANAKO_HISTORY_DETAIL/{$ARG_HISTORY_ID}") { entry ->
                     val resultId = entry.arguments?.getString(ARG_HISTORY_ID)
                     val result = settings.history.firstOrNull { it.id == resultId }
-                    HistoryDetailScreen(result = result)
+                    // 历史详情页内置「继续追问」：复用共享会话/模型，与悬浮窗分析页体验一致。
+                    HistoryDetailScreen(
+                        result = result,
+                        chatHolder = viewModel.chatSessionHolder,
+                        chatProviders = settings.providers,
+                        chatCatalog = viewModel.chatModelCatalog
+                    )
                 }
                 composable(ROUTE_SETTINGS_PROVIDER) {
                     ProviderSettingsScreen(

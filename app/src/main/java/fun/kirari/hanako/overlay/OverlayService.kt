@@ -106,6 +106,10 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     private var panelHandleParams: WindowManager.LayoutParams? = null
     private var panelScreenHeightPx: Int = 0
     private var panelHeightPx: Int = 0
+    /** 面板窗口允许的最大高度（常态 = [panelHeightPx]；聊天展开且键盘弹出时临时上扩）。 */
+    private var panelMaxHeightPx: Int = 0
+    /** 是否因「聊天展开 + 键盘可见」而临时把面板向上扩展（覆盖面板上方的空余屏幕）。 */
+    private var panelChatImeExpanded = false
     private var panelDockHeightPx: Int = 0
     private var panelCurrentHeightPx: Int = 0
     private var panelHandleHeightPx: Int = 0
@@ -259,13 +263,16 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                 )
                 updateBubbleAppearance(state.bubbleState, state.launchMode)
                 if (state.sheetVisible) {
-                    // 全屏抽屉优先：抽屉可见时收起迷你聊天，避免两个浮层叠加。
-                    hideMiniChat()
+                    // 全屏抽屉可见时隐藏悬浮球，避免它压住截图内容/被拍进截图。
+                    // 迷你聊天窗不再强制收起：分析页「更多」可在保留抽屉的同时唤出迷你窗，
+                    // 让用户边看当前处理页边追问；双击悬浮球仍走「二选一」切换（见 setMiniChatVisible）。
+                    setBubbleVisible(false)
                     showOrUpdatePanel(state.sheetMode)
                 } else {
                     hidePanelWithAnimation()
-                    if (state.miniChatVisible) showMiniChat() else hideMiniChat()
+                    setBubbleVisible(true)
                 }
+                if (state.miniChatVisible) showMiniChat() else hideMiniChat()
                 if (state.autoRunState == AutoRunState.COMPLETED) {
                     val completionId = state.result?.id ?: state.autoCopiedLabel
                     if (completionId != null && completionId != lastHandledCompletionId) {
@@ -294,6 +301,19 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                 }
             }
         }
+    }
+
+    /**
+     * 悬浮球显隐：截图抽屉可见时隐藏（不遮挡截图内容），抽屉关闭或「继续截图」时恢复。
+     *
+     * 只在状态实际变化时改 View 可见性，避免每个 uiState 都重复写一次。
+     */
+    private fun setBubbleVisible(visible: Boolean) {
+        val view = bubbleView ?: return
+        val target = if (visible) View.VISIBLE else View.GONE
+        if (view.visibility == target) return
+        view.visibility = target
+        AppDebugLogStore.d(logTag, "bubble visibility -> ${if (visible) "VISIBLE" else "GONE"}")
     }
 
     private fun showBubble() {
@@ -471,13 +491,16 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
 
         panelScreenHeightPx = screenHeightPx
         panelHeightPx = targetHeightPx
+        if (!panelChatImeExpanded) panelMaxHeightPx = targetHeightPx
         panelDockHeightPx = dockHeightPx
         panelHandleHeightPx = (28f * density).roundToInt()
         panelHandleWidthPx = (88f * density).roundToInt()
         if (panelView == null) {
             panelCurrentHeightPx = dockHeightPx
         } else {
-            panelCurrentHeightPx = panelCurrentHeightPx.coerceIn(dockHeightPx, targetHeightPx)
+            // 上限取当前允许的最大高度：聊天+键盘期间窗口已上扩，不能被 uiState 刷新缩回常态高度。
+            val ceiling = panelMaxHeightPx.coerceAtLeast(targetHeightPx)
+            panelCurrentHeightPx = panelCurrentHeightPx.coerceIn(dockHeightPx, ceiling)
         }
 
         val params = panelParams ?: WindowManager.LayoutParams(
@@ -545,7 +568,10 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                             viewModel = overlayViewModel,
                             onDismiss = { overlayViewModel.closeSheet() },
                             panelHeightPx = panelHeightPx,
-                            contentAtTopChange = { atTop -> panelRoot.contentAtTop = atTop }
+                            contentAtTopChange = { atTop -> panelRoot.contentAtTop = atTop },
+                            onChatExpandedChange = ::setPanelChatFocusable,
+                            // 键盘弹出 + 聊天展开：面板窗口向上扩展给消息区更多高度。
+                            onChatImeChange = ::setPanelChatImeExpanded
                         )
                     }
                 }
@@ -634,7 +660,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         if (panelHeightPx <= 0) return
         panelAnimationJob?.cancel()
         val next = panelCurrentHeightPx - deltaY.roundToInt()
-        applyPanelHeight(next.coerceIn(0, panelHeightPx))
+        applyPanelHeight(next.coerceIn(0, panelMaxHeightPx.coerceAtLeast(panelHeightPx)))
     }
 
     /**
@@ -642,7 +668,7 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
      */
     private fun settlePanel() {
         val current = panelCurrentHeightPx
-        val target = panelHeightPx
+        val target = panelMaxHeightPx.coerceAtLeast(panelHeightPx)
         if (target <= 0) return
         if (current < target * 2 / 3) {
             overlayViewModel.closeSheet()
@@ -656,7 +682,8 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         val params = panelParams
         val handleParams = panelHandleParams
         if (panelHeightPx <= 0 || panelScreenHeightPx <= 0) return
-        panelCurrentHeightPx = heightPx.coerceIn(0, panelHeightPx)
+        panelCurrentHeightPx =
+            heightPx.coerceIn(0, panelMaxHeightPx.coerceAtLeast(panelHeightPx))
         if (params != null) {
             params.y = (panelScreenHeightPx - panelCurrentHeightPx).coerceAtLeast(0)
             params.height = panelCurrentHeightPx.coerceAtLeast(1)
@@ -680,8 +707,9 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     ) {
         panelAnimationJob?.cancel()
         panelAnimationJob = serviceScope.launch {
-            val start = fromHeightPx.coerceIn(0, panelHeightPx.coerceAtLeast(fromHeightPx))
-            val end = toHeightPx.coerceIn(0, panelHeightPx.coerceAtLeast(toHeightPx))
+            val ceiling = panelMaxHeightPx.coerceAtLeast(panelHeightPx)
+            val start = fromHeightPx.coerceIn(0, ceiling)
+            val end = toHeightPx.coerceIn(0, ceiling)
             animatePanelHeightSegment(
                 startHeightPx = start,
                 endHeightPx = end,
@@ -989,7 +1017,9 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
      */
     private fun hanakoCaptureWindowFrames(): List<MaskWindow> =
         hanakoCaptureWindows().map { view ->
-            if (!view.isAttachedToWindow) {
+            // 只有「已附着且可见」的窗口才真的参与屏幕合成。隐藏（GONE/INVISIBLE）的窗口若仍按
+            // 其陈旧矩形参与遮罩，会在截图里留下一块纯黑方块（悬浮球随截图页隐藏后尤其明显）。
+            if (!view.isAttachedToWindow || view.visibility != View.VISIBLE) {
                 MaskWindow(WindowRect(0, 0, 0, 0), attached = false)
             } else {
                 val location = IntArray(2)
@@ -1030,6 +1060,10 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
     }
 
     private fun removePanelNow() {
+        setPanelChatFocusable(false)
+        // 复位「键盘展开时上扩」状态，避免下次打开面板沿用放大后的高度上限。
+        panelChatImeExpanded = false
+        panelMaxHeightPx = 0
         panelHandleView?.let { view ->
             runCatching { windowManager.removeView(view) }
         }
@@ -1043,6 +1077,78 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
         panelParams = null
         panelCurrentHeightPx = 0
         panelClosing = false
+    }
+
+    /**
+     * 结果页「继续追问」展开/收起时切换面板窗口能否获取输入焦点。
+     *
+     * 面板窗口默认 `FLAG_NOT_FOCUSABLE`（不抢底层应用焦点），代价是窗口内输入框无法弹出软键盘。
+     * 展开内嵌聊天时临时移除该标志（保留 `FLAG_NOT_TOUCH_MODAL`，窗口外点击继续透传给底层应用），
+     * 收起后恢复，避免常驻抢焦点。
+     */
+    private fun setPanelChatFocusable(focusable: Boolean) {
+        val view = panelView ?: return
+        val params = panelParams ?: return
+        val currentlyFocusable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) == 0
+        if (currentlyFocusable == focusable) return
+        params.flags = if (focusable) {
+            params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        } else {
+            params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        }
+        params.softInputMode = if (focusable) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // API 30+：不移动窗口，改由页面用 Compose 的 imePadding 压缩可视区，
+                // 键盘弹出时输入框与整排功能键都停在键盘上方（旧做法 adjustPan 只保证
+                // 输入框露出，输入框下方那一截仍会被键盘压住）。
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+            } else {
+                // 旧版本取不到可靠的 ime insets，退回系统平移，至少保证输入框可见。
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+            }
+        } else {
+            WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED
+        }
+        runCatching { windowManager.updateViewLayout(view, params) }.onFailure {
+            AppDebugLogStore.e(logTag, "setPanelChatFocusable failed focusable=$focusable", it)
+        }
+        if (!focusable) {
+            // 收起聊天区后主动收起键盘，避免残留键盘压住已缩回的页面。
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+            runCatching { imm?.hideSoftInputFromWindow(view.windowToken, 0) }
+        }
+    }
+
+    /**
+     * 「继续追问已展开且键盘可见」时把面板窗口向上扩展给聊天内容区。
+     *
+     * 面板常态只占屏幕 92%，上方约 8% 是屏幕空余；键盘弹出后又压掉约 1/3 高度，
+     * 中间消息区只剩很小一段。此时把窗口上边缘顶到状态栏下沿（[panelMaxHeightPx] 临时放大），
+     * 键盘收起或聊天收起后立即恢复常态高度。窗口下边缘始终在屏幕底部，ime 内边距计算不受影响。
+     */
+    private fun setPanelChatImeExpanded(expanded: Boolean) {
+        if (panelChatImeExpanded == expanded) return
+        panelChatImeExpanded = expanded
+        if (panelClosing) return
+        if (panelView == null || panelHeightPx <= 0 || panelScreenHeightPx <= 0) return
+        panelMaxHeightPx = if (expanded) {
+            (panelScreenHeightPx - statusBarHeightPx()).coerceAtLeast(panelHeightPx)
+        } else {
+            panelHeightPx
+        }
+        // 扩展后面板顶部的拖拽把手会跑进状态栏，直接隐藏；恢复常态时再显示。
+        panelHandleView?.visibility = if (expanded) View.INVISIBLE else View.VISIBLE
+        applyPanelHeight(if (expanded) panelMaxHeightPx else panelHeightPx)
+    }
+
+    /** 系统状态栏高度（像素）；取不到时按 24dp 估算。 */
+    private fun statusBarHeightPx(): Int {
+        val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (resId > 0) {
+            resources.getDimensionPixelSize(resId)
+        } else {
+            (24f * resources.displayMetrics.density).roundToInt()
+        }
     }
 
     // ========================
@@ -1106,7 +1212,9 @@ class OverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStat
                         onHeaderDrag = { dx, dy -> moveMiniChatBy(dx, dy) },
                         onOpenMainApp = { openMainChatAndHideMini() },
                         onClose = { overlayViewModel.setMiniChatVisible(false) },
-                        onLongPressResize = { toggleMiniChatSize() }
+                        onLongPressResize = { toggleMiniChatSize() },
+                        // 迷你窗与「继续追问」共用同一会话；发送时实时读取当前分析页内容。
+                        pageContext = { overlayResultPageContext(overlayViewModel.uiState.value) }
                     )
                 }
             }

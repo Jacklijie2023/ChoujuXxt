@@ -28,6 +28,13 @@ internal enum class AutoRunState {
     COMPLETED
 }
 
+internal data class LongPageSegment(
+    /** 该屏在累计长图中的起始行（像素）。 */
+    val offsetY: Int,
+    /** 该屏自身的高度（像素）。 */
+    val height: Int
+)
+
 internal data class OverlayUiState(
     val settings: AppSettings = AppSettings(),
     val screenshot: Bitmap? = null,
@@ -41,6 +48,13 @@ internal data class OverlayUiState(
     val sheetMode: OverlaySheetMode = OverlaySheetMode.CROP,
     /** 手动长截图会话进行中：再次点击悬浮球会把新一屏追加到 [longScreenshotBitmap] 下方。 */
     val longCaptureActive: Boolean = false,
+    /**
+     * 已截图但**尚未拼接**的当前屏：面板里显示这一屏，等用户框选好区域后
+     * 点「继续截图」/「确认处理」时再按这次框选裁剪并拼到 [longScreenshotBitmap] 下方。
+     *
+     * 这样第 2 屏、第 N 屏都能使用「自己这一次」的框选区域，而不是永远沿用第 1 屏的区域。
+     */
+    val longPagePending: Boolean = false,
     /** 长截图已拼接的屏数（含第一屏）。 */
     val longCapturePages: Int = 0,
     /**
@@ -50,6 +64,8 @@ internal data class OverlayUiState(
      * 上方可滚动的原图区域显示累计结果；「确认处理」发送的也是这张长图。
      */
     val longScreenshotBitmap: Bitmap? = null,
+    /** 「原图」中每一屏在累计长图里的纵向区段：点击长图时按它判断用户想查看哪一屏。 */
+    val longPageSegments: List<LongPageSegment> = emptyList(),
     /**
      * 长截图使用的裁剪区域（原图坐标）；null 表示未框选、使用整屏。
      *
