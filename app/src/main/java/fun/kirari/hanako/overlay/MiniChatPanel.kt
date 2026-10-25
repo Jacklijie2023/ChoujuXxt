@@ -169,6 +169,8 @@ internal fun MiniChatPanel(
     val screenContextActive by appContainer.screenContextManager.active.collectAsState()
     val screenContextSnapshot by appContainer.screenContextManager.snapshot.collectAsState()
     val screenContextReport by appContainer.screenContextManager.lastReport.collectAsState()
+    // 证据层：最近一次请求绑定的题目上下文状态（就绪 / 部分可用 / 过期 / 更新中 + 图像数 + 版本）。
+    val realtimeContextUi by holder.realtimeContextStatus.collectAsState()
     // 阶段 2：后台持续采集器的**实时**状态（启用/停止、最近读取成功/空文本/失败、最近滚动、
     // 最近探测、最近后台 OCR、最近池更新）。采集器对外只提供同步快照读取（不截图、不发请求），
     // 因此这里按固定间隔轮询刷新 —— 使顶部状态条反映**当前**采集情况，而不是打开面板时的一次旧快照。
@@ -289,7 +291,8 @@ internal fun MiniChatPanel(
                         active = screenContextActive,
                         snapshot = screenContextSnapshot,
                         report = screenContextReport,
-                        collection = realtimeCollectionStatus
+                        collection = realtimeCollectionStatus,
+                        contextLabel = realtimeContextUi?.label
                     )
                     val collectorHasData = realtimeCollectionStatus.lastEventKind != null ||
                         realtimeCollectionStatus.lastTextReadStatus != null ||

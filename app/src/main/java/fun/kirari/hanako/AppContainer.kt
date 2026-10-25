@@ -10,6 +10,7 @@ import `fun`.kirari.hanako.capture.StaleFrameException
 import `fun`.kirari.hanako.chat.ChatConfig
 import `fun`.kirari.hanako.chat.ChatModelCatalog
 import `fun`.kirari.hanako.chat.ChatSessionHolder
+import `fun`.kirari.hanako.chat.buildInjectedPrompt
 import `fun`.kirari.hanako.chat.ScreenContextResult
 import `fun`.kirari.hanako.chat.UnifiedChatStreamSource
 import `fun`.kirari.hanako.data.AppSettings
@@ -20,6 +21,18 @@ import `fun`.kirari.hanako.data.SettingsStore
 import `fun`.kirari.hanako.data.resolveModelName
 import `fun`.kirari.hanako.data.resolveModelProvider
 import `fun`.kirari.hanako.debug.AppDebugLogStore
+import `fun`.kirari.hanako.evidence.AssembledQuestionContext
+import `fun`.kirari.hanako.evidence.ContextImageRef
+import `fun`.kirari.hanako.evidence.EvidenceImageFiles
+import `fun`.kirari.hanako.evidence.EvidenceRecord
+import `fun`.kirari.hanako.evidence.EvidenceStats
+import `fun`.kirari.hanako.evidence.EvidenceStore
+import `fun`.kirari.hanako.evidence.ImageAssetRecord
+import `fun`.kirari.hanako.evidence.QuestionContextStatus
+import `fun`.kirari.hanako.evidence.RealtimeEvidenceRecorder
+import `fun`.kirari.hanako.evidence.RequestTraceRecord
+import `fun`.kirari.hanako.evidence.SqliteEvidenceStore
+import `fun`.kirari.hanako.evidence.ClassifiedBlock
 import `fun`.kirari.hanako.localocr.LocalOcrManager
 import `fun`.kirari.hanako.network.NetworkClientProvider
 import `fun`.kirari.hanako.network.ProviderModelsApi
@@ -179,10 +192,44 @@ internal class AppContainer(private val appContext: Context) {
      * 只在实时模式下随无障碍事件（以及确有必要时的单次本地 OCR）后台累积**同一道题**的屏幕文本，
      * 用于验证「文本池能否连续积累」与「能否检测题目切换」。
      *
-     * 关键边界：[currentScreenContextForPrompt] 仍走原有单次解析流程，**不读取**该文本池，
-     * 因此任何一次发送请求使用的屏幕文本都不受本采集器影响；本采集器也**不**发起大模型请求。
+     * 关键边界：本采集器只负责**观察与累计**，**不**发起大模型请求；
+     * [currentScreenContextForPrompt] 在发送时优先读取由证据库重建的权威上下文，
+     * 只有该上下文不可用 / 过期时才回退到本次实时读取。
      */
     val realtimeViewportCollector = RealtimeViewportCollector()
+
+    /**
+     * 原始证据层（SQLite 元数据 + 应用私有目录图像文件）。
+     *
+     * 与文本池（派生层）严格分离：池可以合并 / 淘汰 / 清空，证据库只追加与按保留策略清理，
+     * 因此「过滤后上下文变化」永远可以从证据重建。
+     */
+    private val evidenceStore: EvidenceStore = SqliteEvidenceStore(appContext)
+    private val evidenceImageFiles = EvidenceImageFiles(appContext)
+
+    /** 采集 / 过滤 / 上下文重建的唯一入口（无障碍、后台 OCR、请求补救、测试中心共用）。 */
+    val realtimeEvidence = RealtimeEvidenceRecorder(
+        context = appContext,
+        store = evidenceStore,
+        images = evidenceImageFiles,
+        ownPackage = appContext.packageName,
+        boundTargetPackageProvider = { boundTargetPackage.value }
+    )
+
+    /** 证据优先读取的「新鲜窗口」：超过该时长未被观察更新时，回退本次实时读取。 */
+    private val evidenceFirstFreshMillis = 8_000L
+
+    /** 请求侧补写证据的去重窗口：同一屏在极短时间内被观察器与本请求各写一次时只保留一条。 */
+    @Volatile
+    private var lastRequestEvidenceHash: String? = null
+    @Volatile
+    private var lastRequestEvidenceAt: Long = 0L
+
+    /** 观察器写入证据的去重状态（同一画面 1.5 秒内不重复写）。 */
+    @Volatile
+    private var lastObserverEvidenceHash: String? = null
+    @Volatile
+    private var lastObserverEvidenceAt: Long = 0L
 
     /**
      * 「画面变化探测回退」的后台任务（阶段 2 修复 B）。
@@ -229,7 +276,28 @@ internal class AppContainer(private val appContext: Context) {
         persistence = ChatSessionStore(appContext),
         screenContextInjector = { traceId -> currentScreenContextForPrompt(traceId) },
         screenContextReporter = { screenContextManager.recordRead(it) },
-        traceLogger = { AppDebugLogStore.i(ChatTraceTag, it) }
+        traceLogger = { AppDebugLogStore.i(ChatTraceTag, it) },
+        contextImageLoader = { refs ->
+            // 调用方处于后台协程（非主线程）；这里只做文件读取与 JPEG 编码，读取失败返回 null 使数量变短，
+            // 发送侧据此如实记录「图像未发送」，而不是伪造成功。
+            refs.mapNotNull { ref ->
+                evidenceImageFiles.readBase64ForModel(
+                    ImageAssetRecord(
+                        imageId = ref.imageId,
+                        evidenceId = ref.evidenceId,
+                        questionId = ref.questionId,
+                        originalRef = ref.originalRef,
+                        previewRef = ref.previewRef,
+                        sha256 = ref.sha256,
+                        capturedAtMillis = ref.capturedAtMillis,
+                        width = 0,
+                        height = 0,
+                        available = ref.available
+                    )
+                )
+            }
+        },
+        requestTraceSink = { trace -> realtimeEvidence.recordTrace(trace) }
     )
 
     init {
@@ -265,8 +333,16 @@ internal class AppContainer(private val appContext: Context) {
                         HanakoAccessibilityService.startMonitoring()
                         // 阶段 2：开启持续采集（从空文本池开始）。
                         realtimeViewportCollector.setEnabled(true)
+                        // 证据层：新会话序号段（历史证据保留，供回查与重启后重建）。
+                        realtimeEvidence.onSessionBoundary()
                         // 阶段 2 修复 B：启动受控「画面变化探测回退」（仅在该模式下运行）。
                         startRealtimeScreenProbe()
+                        appScope.launch(Dispatchers.IO) {
+                            realtimeEvidence.prune(
+                                RealtimeEvidenceRecorder.DEFAULT_RETENTION_MILLIS,
+                                activeQuestionId = realtimeViewportCollector.status().questionKey
+                            )
+                        }
                     } else {
                         // 先停探测任务，避免关闭瞬间仍有在途截图 / OCR。
                         stopRealtimeScreenProbe()
@@ -274,6 +350,8 @@ internal class AppContainer(private val appContext: Context) {
                         screenContextManager.stop()
                         // 阶段 2：停止采集并释放文本池，避免关闭后仍残留会话上下文。
                         realtimeViewportCollector.setEnabled(false)
+                        // 证据层：关闭模式不删除任何历史证据，只结束当前会话段。
+                        realtimeEvidence.onSessionBoundary()
                     }
                 }
         }
@@ -335,6 +413,11 @@ internal class AppContainer(private val appContext: Context) {
             AppDebugLogStore.i(ScreenCtxTag, "trace=$traceId stage=a11y_disabled")
             return ScreenContextResult.Missing(failureReasonText("a11y_disabled"))
         }
+
+        // 阶段 0.5：证据优先 —— 持续观察已经把最新屏幕写入证据库时，直接使用由证据重建的
+        // **权威题目上下文**，不再为一次提问触发新的扫描（需求 §7：双击悬浮球后不重新扫描）。
+        // 只有证据过期 / 为空 / 来源不一致时才回退到下面的实时读取。
+        evidenceContextForPrompt(traceId, now)?.let { return it }
 
         // 诊断累积字段：成功与失败路径共用，绝不把「第一次窗口元数据 + 第二次文本」拼成一条记录。
         var screenshotAttempted: Boolean? = null
@@ -471,11 +554,17 @@ internal class AppContainer(private val appContext: Context) {
                                 "injectedSegmentIds=- contextChars=${text.length} " +
                                 "contextFp=${ocrFingerprintOf(text)}"
                         )
-                        return ScreenContextResult.Available(
-                            text,
-                            traceId,
-                            ScreenContextSource.ACCESSIBILITY,
-                            finalReport
+                        return attachEvidenceContext(
+                            result = ScreenContextResult.Available(
+                                text,
+                                traceId,
+                                ScreenContextSource.ACCESSIBILITY,
+                                finalReport
+                            ),
+                            liveText = text,
+                            sourceApp = read.packageName,
+                            source = ScreenContextSource.ACCESSIBILITY,
+                            traceId = traceId
                         )
                     }
                     RequestScreenContextAction.FRESH_CAPTURE -> {
@@ -548,7 +637,17 @@ internal class AppContainer(private val appContext: Context) {
                 null
             }
             screenshotSucceeded = bitmap != null
-            if (bitmap == null) return@refreshViaOcr null
+            if (bitmap == null) {
+                realtimeEvidence.recordFailure(
+                    stage = "capture",
+                    message = captureError ?: "本次截图失败",
+                    sourceApp = read.packageName,
+                    questionId = realtimeViewportCollector.status().questionKey,
+                    viewportId = "request-ocr-$traceId",
+                    eventId = traceId
+                )
+                return@refreshViaOcr null
+            }
             bitmapWidth = bitmap.width
             bitmapHeight = bitmap.height
             // 诊断快照：登记本次**真正送入本地 OCR**的截图（等比缩放 + JPEG，仅内存、不落盘、不上传）。
@@ -573,10 +672,33 @@ internal class AppContainer(private val appContext: Context) {
                         "lines=${organization.rowCount} orderedChars=${organization.text.length} " +
                         "options=${organization.optionMarkerCount} association=${organization.association}"
                 )
+                // 证据层：请求补救采集同样写入原始证据（截图 + OCR 原文 + 过滤结果），
+                // 与后台观察共享同一个证据库；失败与空结果也不得丢弃。
+                realtimeEvidence.recordOcr(
+                    bitmap = bitmap,
+                    rawText = ocrResult.rawText,
+                    organization = organization,
+                    sourceApp = read.packageName,
+                    windowId = read.packageName,
+                    windowType = null,
+                    questionId = realtimeViewportCollector.status().questionKey,
+                    viewportId = "request-ocr-$traceId",
+                    eventId = traceId,
+                    errorStage = if (organization.text.isBlank()) "ocr" else null,
+                    errorMessage = if (organization.text.isBlank()) "OCR 未识别到有效文字" else null
+                )
                 organization.text.takeIf { it.isNotBlank() }
             } catch (t: Throwable) {
                 if (t is UnsupportedOperationException) ocrNotAvailable = true
                 ocrError = (t.cause ?: t).javaClass.simpleName
+                realtimeEvidence.recordFailure(
+                    stage = "ocr",
+                    message = ocrError.orEmpty(),
+                    sourceApp = read.packageName,
+                    questionId = realtimeViewportCollector.status().questionKey,
+                    viewportId = "request-ocr-$traceId",
+                    eventId = traceId
+                )
                 null
             }
         }
@@ -638,11 +760,17 @@ internal class AppContainer(private val appContext: Context) {
                             "injectedSegmentIds=- contextChars=${ocrText.length} " +
                             "contextFp=${ocrFingerprintOf(ocrText)}"
                     )
-                    return ScreenContextResult.Available(
-                        ocrText,
-                        traceId,
-                        ScreenContextSource.LOCAL_OCR,
-                        finalReport
+                    return attachEvidenceContext(
+                        result = ScreenContextResult.Available(
+                            ocrText,
+                            traceId,
+                            ScreenContextSource.LOCAL_OCR,
+                            finalReport
+                        ),
+                        liveText = ocrText,
+                        sourceApp = read.packageName,
+                        source = ScreenContextSource.LOCAL_OCR,
+                        traceId = traceId
                     )
                 }
             }
@@ -772,18 +900,149 @@ internal class AppContainer(private val appContext: Context) {
                 "contextChars=${finalText.length} contextFp=${ocrFingerprintOf(finalText)} " +
                 "assembleNote=${assembly.note}"
         )
+        return attachEvidenceContext(
+            result = ScreenContextResult.Available(
+                text = finalText,
+                traceId = traceId,
+                source = ScreenContextSource.POOL_SNAPSHOT,
+                readReport = report,
+                // R8.7 P3.5：片段 ID 必须与**最终注入文本**对应 —— 这里直接取快照里「实际贡献了文字」的那些。
+                includedSegmentIds = snapshot.includedSegmentIds,
+                hasSegmentBreak = finalText.contains(ScreenContextPool.SEGMENT_BREAK_MARK) ||
+                    finalText.contains(LIVE_VIEWPORT_MARK),
+                liveIncluded = assembly.liveIncluded,
+                liveViewportId = viewportId,
+                liveVerified = assembly.liveVerified
+            ),
+            liveText = liveViewport,
+            sourceApp = currentWindowPackage,
+            source = liveSource,
+            traceId = traceId
+        )
+    }
+
+    /**
+     * 证据优先：从持续观察已写入的原始证据重建最新权威上下文。
+     *
+     * 只在「已绑定目标 + 已建立题目上下文 + 证据新鲜 + 来源一致」时返回可用结果，
+     * 其它情况返回 null 让调用方回退到本次实时读取（绝不拿旧缓存冒充当前屏幕）。
+     */
+    private suspend fun evidenceContextForPrompt(
+        traceId: String,
+        now: Long
+    ): ScreenContextResult.Available? {
+        val bound = boundTargetPackage.value?.trim()?.ifBlank { null } ?: return null
+        val questionId = realtimeViewportCollector.status().questionKey?.takeIf { it.isNotBlank() }
+            ?: return null
+        val context = withContext(Dispatchers.IO) {
+            realtimeEvidence.rebuildContext(
+                questionId = questionId,
+                liveViewportCovered = true,
+                boundTargetPackage = bound
+            )
+        }
+        val rejectReason = when {
+            context.status == QuestionContextStatus.UNAVAILABLE -> "context_unavailable"
+            context.status == QuestionContextStatus.STALE -> "context_stale"
+            context.text.isBlank() -> "context_empty"
+            context.freshnessMillis > evidenceFirstFreshMillis -> "context_age_ms=${context.freshnessMillis}"
+            context.sourceApp != null && context.sourceApp != bound -> "context_source_mismatch"
+            else -> null
+        }
+        if (rejectReason != null) {
+            AppDebugLogStore.i(
+                ScreenCtxTag,
+                "trace=$traceId evidence_context fallback=$rejectReason question=$questionId " +
+                    "status=${context.status} ageMs=${context.freshnessMillis} chars=${context.text.length} " +
+                    "evidence=${context.evidenceIds.size} images=${context.availableImages.size}"
+            )
+            return null
+        }
+        val report = ScreenReadReport(
+            traceId = traceId,
+            status = ScreenReadStatus.CONTEXT_AVAILABLE,
+            source = ScreenContextSource.POOL_SNAPSHOT,
+            a11yEnabled = true,
+            a11yConnected = HanakoAccessibilityService.isRunning(),
+            targetPackage = context.sourceApp ?: bound,
+            windowValid = true,
+            charCount = context.text.length,
+            injected = true,
+            injectedText = context.text,
+            contentQuality = context.status.name,
+            readAtMillis = now
+        )
+        screenContextManager.recordRead(report)
+        AppDebugLogStore.i(
+            ScreenCtxTag,
+            "trace=$traceId evidence_context INJECT question=${context.questionId} v=${context.version} " +
+                "status=${context.status} ageMs=${context.freshnessMillis} chars=${context.text.length} " +
+                "contextFp=${ocrFingerprintOf(context.text)} evidence=${context.evidenceIds.size} " +
+                "images=${context.availableImages.size} missing=${context.missing.size} note=${context.note ?: "-"}"
+        )
         return ScreenContextResult.Available(
-            text = finalText,
+            text = context.text,
             traceId = traceId,
             source = ScreenContextSource.POOL_SNAPSHOT,
             readReport = report,
-            // R8.7 P3.5：片段 ID 必须与**最终注入文本**对应 —— 这里直接取快照里「实际贡献了文字」的那些。
-            includedSegmentIds = snapshot.includedSegmentIds,
-            hasSegmentBreak = finalText.contains(ScreenContextPool.SEGMENT_BREAK_MARK) ||
-                finalText.contains(LIVE_VIEWPORT_MARK),
-            liveIncluded = assembly.liveIncluded,
-            liveViewportId = viewportId,
-            liveVerified = assembly.liveVerified
+            includedSegmentIds = context.evidenceIds,
+            hasSegmentBreak = context.text.contains(ScreenContextPool.SEGMENT_BREAK_MARK) ||
+                context.text.contains(LIVE_VIEWPORT_MARK),
+            liveIncluded = false,
+            liveVerified = true,
+            liveViewportId = "evidence-v${context.version}",
+            questionId = context.questionId,
+            contextVersion = context.version,
+            contextStatus = context.status.name,
+            contextImages = context.images,
+            contextMissing = context.missing
+        )
+    }
+
+    /**
+     * 为实时读取得到的可用上下文补上**证据层事实**：题目 id、版本、图像证据与明确缺失。
+     *
+     * 同时把本次请求真正读到的当前屏补写为原始证据（同一屏 2 秒内不重复写），
+     * 使「请求补救采集」与「后台观察采集」共享同一个证据库，而不是两套数据。
+     */
+    private fun attachEvidenceContext(
+        result: ScreenContextResult.Available,
+        liveText: String,
+        sourceApp: String?,
+        source: ScreenContextSource,
+        traceId: String
+    ): ScreenContextResult.Available {
+        val bound = boundTargetPackage.value
+        val questionId = realtimeViewportCollector.status().questionKey?.takeIf { it.isNotBlank() }
+            ?: return result
+        if (liveText.isNotBlank()) {
+            val hash = ocrFingerprintOf(liveText)
+            val now = System.currentTimeMillis()
+            if (hash != lastRequestEvidenceHash || now - lastRequestEvidenceAt > 2_000) {
+                lastRequestEvidenceHash = hash
+                lastRequestEvidenceAt = now
+                realtimeEvidence.recordAccessibility(
+                    text = liveText,
+                    sourceApp = sourceApp,
+                    windowId = null,
+                    windowType = null,
+                    questionId = questionId,
+                    viewportId = "request-${source.name.lowercase()}-$now",
+                    eventId = traceId
+                )
+            }
+        }
+        val context = realtimeEvidence.rebuildContext(
+            questionId = questionId,
+            liveViewportCovered = true,
+            boundTargetPackage = bound
+        )
+        return result.copy(
+            questionId = context.questionId,
+            contextVersion = context.version,
+            contextStatus = context.status.name,
+            contextImages = context.images,
+            contextMissing = context.missing
         )
     }
 
@@ -874,6 +1133,32 @@ internal class AppContainer(private val appContext: Context) {
         }
         // [ocr_gate_decision]：不触发 OCR 时必须显式记录「未执行及原因」，
         // 不得仅凭源码中存在该函数就宣称后台 OCR 已运行。
+        // 证据层：只要本次观察读到了文本且内容确有变化（或被接受），就把原文写入证据库，
+        // 使「持续观察」与「请求补救」共享同一个可回溯来源；同一画面 1.5 秒内不重复写。
+        val observedText = text?.takeIf { it.isNotBlank() }
+        if (observedText != null) {
+            val hash = ocrFingerprintOf(observedText)
+            val nowMillis = System.currentTimeMillis()
+            val shouldRecord = outcome.poolContentChanged ||
+                outcome.result == PoolUpdateResult.NEW_QUESTION ||
+                (hash != lastObserverEvidenceHash && nowMillis - lastObserverEvidenceAt >= 1_500)
+            if (shouldRecord) {
+                lastObserverEvidenceHash = hash
+                lastObserverEvidenceAt = nowMillis
+                val evidenceQuestionId = submitted.questionKey
+                appScope.launch(Dispatchers.IO) {
+                    realtimeEvidence.recordAccessibility(
+                        text = observedText,
+                        sourceApp = windowKey,
+                        windowId = windowKey,
+                        windowType = null,
+                        questionId = evidenceQuestionId,
+                        viewportId = "a11y-${observationId}-$nowMillis",
+                        eventId = "obs-$observationId"
+                    )
+                }
+            }
+        }
         if (!realtimeViewportCollector.shouldTriggerOcr(outcome.result)) {
             AppDebugLogStore.i(
                 ScreenCtxTag,
@@ -914,6 +1199,16 @@ internal class AppContainer(private val appContext: Context) {
                             "hasSession=${ScreenCaptureManager.hasActiveSession(settings.screenCaptureMethod)} " +
                             "未改动文本池"
                     )
+                    withContext(Dispatchers.IO) {
+                        realtimeEvidence.recordFailure(
+                            stage = "capture_session_unavailable",
+                            message = "截图会话不可用，本次未采集画面",
+                            sourceApp = windowKey,
+                            questionId = realtimeViewportCollector.status().questionKey,
+                            viewportId = "bg-ocr-$sequence",
+                            eventId = "bg-ocr-$sequence"
+                        )
+                    }
                     return@launch
                 }
                 AppDebugLogStore.i(ScreenCtxTag, "capture_started seq=$sequence")
@@ -968,12 +1263,41 @@ internal class AppContainer(private val appContext: Context) {
                             "lines=${organization.rowCount} result=${poolOutcome.result.name}"
                     )
                 }
+                // 证据层：**原始截图 + 原始 OCR 文本**先落库，再谈是否被池接受。
+                // 即使本次合并被判为过期 / 不可靠，原始证据仍然可供回查与重建。
+                val evidenceQuestionId = realtimeViewportCollector.status().questionKey
+                withContext(Dispatchers.IO) {
+                    realtimeEvidence.recordOcr(
+                        bitmap = bitmap,
+                        rawText = ocrResult.rawText,
+                        organization = organization,
+                        sourceApp = windowKey,
+                        windowId = windowKey,
+                        windowType = null,
+                        questionId = evidenceQuestionId,
+                        viewportId = "bg-ocr-$sequence",
+                        eventId = "bg-ocr-$sequence",
+                        errorStage = if (organization.text.isBlank()) "ocr" else null,
+                        errorMessage = if (organization.text.isBlank()) "OCR 未识别到有效文字" else null
+                    )
+                }
             } catch (t: Throwable) {
                 AppDebugLogStore.i(
                     ScreenCtxTag,
                     "realtime_failed seq=$sequence stage=$stage ${(t.cause ?: t).javaClass.simpleName}"
                 )
                 realtimeViewportCollector.failOcrAttempt(sequence)
+                withContext(Dispatchers.IO) {
+                    realtimeEvidence.recordFailure(
+                        stage = stage,
+                        message = (t.cause ?: t).javaClass.simpleName +
+                            (t.message?.let { ": $it" } ?: ""),
+                        sourceApp = windowKey,
+                        questionId = realtimeViewportCollector.status().questionKey,
+                        viewportId = "bg-ocr-$sequence",
+                        eventId = "bg-ocr-$sequence"
+                    )
+                }
             }
         }
     }
@@ -1170,6 +1494,224 @@ internal class AppContainer(private val appContext: Context) {
             }
         )
     }
+
+    // ==================== 实时互动测试中心（真实业务数据入口） ====================
+
+    /**
+     * 测试中心「运行状态」区块的真实数据快照。
+     *
+     * 所有字段都来自当前运行时与证据库，不使用任何静态样例或模拟成功状态。
+     */
+    internal data class RealtimeTestSnapshot(
+        val realtimeEnabled: Boolean,
+        val runtimeRunning: Boolean,
+        val accessibilityRunning: Boolean,
+        val accessibilityConnected: Boolean,
+        val captureSessionActive: Boolean,
+        val captureMethod: String,
+        val collectorEnabled: Boolean,
+        val collectorQuestionKey: String?,
+        val collectorLastResult: String,
+        val collectorLastSource: String,
+        val collectorOcrInFlight: Boolean,
+        val collectorSequence: Long,
+        val collectorAcceptedSequence: Long,
+        val collectorTextChars: Int,
+        val sessionId: String,
+        val evidenceCount: Int,
+        val imageCount: Int,
+        val imageMissingCount: Int,
+        val imageBytes: Long,
+        val lastCaptureAtMillis: Long?,
+        val lastFailureStage: String?,
+        val lastFailureMessage: String?,
+        val currentWindowPackage: String?,
+        val boundTargetPackage: String?,
+        val ocrInstallation: String,
+        val context: AssembledQuestionContext?
+    )
+
+    /** 读取测试中心快照（IO 线程；调用方负责在自己的协程里调用）。 */
+    suspend fun realtimeTestSnapshot(): RealtimeTestSnapshot = withContext(Dispatchers.IO) {
+        val status = realtimeViewportCollector.status()
+        val stats = realtimeEvidence.stats()
+        val failure = realtimeEvidence.lastFailure()
+        val questionId = status.questionKey?.takeIf { it.isNotBlank() }
+        val context = if (questionId != null) {
+            awaitEvidenceContext(questionId)
+        } else {
+            realtimeEvidence.currentContext()
+        }
+        RealtimeTestSnapshot(
+            realtimeEnabled = appSettings.value.realTimeMode,
+            runtimeRunning = OverlayRuntimeState.running.value,
+            accessibilityRunning = HanakoAccessibilityService.isRunning(),
+            accessibilityConnected = HanakoAccessibilityService.liveForegroundPackage() != null,
+            captureSessionActive = ScreenCaptureManager.hasActiveSession(appSettings.value.screenCaptureMethod),
+            captureMethod = appSettings.value.screenCaptureMethod.name,
+            collectorEnabled = status.enabled,
+            collectorQuestionKey = status.questionKey,
+            collectorLastResult = status.lastResult?.name ?: "-",
+            collectorLastSource = status.lastSource?.name ?: "-",
+            collectorOcrInFlight = status.ocrInFlight,
+            collectorSequence = status.sequence,
+            collectorAcceptedSequence = status.acceptedSequence,
+            collectorTextChars = status.poolText.length,
+            sessionId = realtimeEvidence.activeSessionId(),
+            evidenceCount = stats.evidenceCount,
+            imageCount = stats.imageCount,
+            imageMissingCount = stats.imageMissingCount,
+            imageBytes = stats.imageBytes,
+            lastCaptureAtMillis = stats.lastCaptureAtMillis,
+            lastFailureStage = failure.first,
+            lastFailureMessage = failure.second,
+            currentWindowPackage = HanakoAccessibilityService.liveForegroundPackage(),
+            boundTargetPackage = boundTargetPackage.value,
+            ocrInstallation = if (localOcrManager.installationStatus().installed) "可用" else "不可用",
+            context = context
+        )
+    }
+
+    /** 测试中心：最近原始证据（含失败记录）。 */
+    fun recentEvidenceForTest(limit: Int = 30): List<EvidenceRecord> =
+        realtimeEvidence.recentEvidence(limit)
+
+    /** 测试中心：某条证据的过滤结果（当前最新规则轮次）。 */
+    fun classificationsForTest(evidenceId: String): List<ClassifiedBlock> =
+        realtimeEvidence.classificationsOf(evidenceId)
+
+    /** 测试中心：最近一次请求追踪（文字指纹 / 实际图像 id / 视觉能力 / 失败阶段）。 */
+    fun recentRequestTracesForTest(limit: Int = 20): List<RequestTraceRecord> =
+        realtimeEvidence.recentTraces(limit)
+
+    /** 测试中心：对指定证据重新执行过滤并重建上下文（真实重跑，可对照规则版本）。 */
+    suspend fun rerunFilterForTest(evidenceId: String): List<ClassifiedBlock> =
+        withContext(Dispatchers.IO) {
+            val blocks = realtimeEvidence.rerunFilter(
+                evidenceId = evidenceId,
+                boundTargetPackage = boundTargetPackage.value
+            )
+            val questionId = realtimeViewportCollector.status().questionKey
+            realtimeEvidence.rebuildContext(
+                questionId = questionId,
+                boundTargetPackage = boundTargetPackage.value
+            )
+            blocks
+        }
+
+    /** 测试中心：按当前证据重建题目上下文（返回真实状态与缺失项）。 */
+    suspend fun rebuildContextForTest(): AssembledQuestionContext = withContext(Dispatchers.IO) {
+        realtimeEvidence.rebuildContext(
+            questionId = realtimeViewportCollector.status().questionKey,
+            boundTargetPackage = boundTargetPackage.value
+        )
+    }
+
+    /**
+     * 测试中心「触发一次受控采集」：截图 → 本地 OCR → 写原始证据 → 过滤 → 重建上下文。
+     *
+     * 与后台观察走同一套证据与过滤代码，但**不**并入文本池、不发起模型请求，
+     * 便于把「采集是否成功」与「模型是否回答」分开验证。
+     */
+    suspend fun manualCaptureForTest(): String = withContext(Dispatchers.IO) {
+        val method = appSettings.value.screenCaptureMethod
+        val bitmap = runCatching {
+            ScreenCaptureManager.captureLatestBitmap(appContext, method)
+        }.getOrNull()
+        if (bitmap == null) {
+            realtimeEvidence.recordFailure(
+                stage = "capture",
+                message = "测试采集截图失败（请确认录屏授权 / 无障碍连接）",
+                sourceApp = HanakoAccessibilityService.liveForegroundPackage(),
+                questionId = realtimeViewportCollector.status().questionKey,
+                viewportId = "manual-test",
+                eventId = "manual-test"
+            )
+            return@withContext "截图失败：请确认录屏授权与无障碍服务已连接"
+        }
+        val ocrResult = runCatching { localOcrManager.recognize(bitmap) }.getOrElse { error ->
+            realtimeEvidence.recordFailure(
+                stage = "ocr",
+                message = error.javaClass.simpleName,
+                sourceApp = HanakoAccessibilityService.liveForegroundPackage(),
+                questionId = realtimeViewportCollector.status().questionKey,
+                viewportId = "manual-test",
+                eventId = "manual-test"
+            )
+            return@withContext "OCR 执行失败：${error.javaClass.simpleName}"
+        }
+        val organization = organizeOcrText(ocrResult)
+        val questionId = realtimeViewportCollector.status().questionKey
+            ?: "manual-${realtimeEvidence.activeSessionId()}"
+        val record = realtimeEvidence.recordOcr(
+            bitmap = bitmap,
+            rawText = ocrResult.rawText,
+            organization = organization,
+            sourceApp = HanakoAccessibilityService.liveForegroundPackage(),
+            windowId = null,
+            windowType = null,
+            questionId = questionId,
+            viewportId = "manual-test",
+            eventId = "manual-test"
+        )
+        realtimeEvidence.rebuildContext(
+            questionId = questionId,
+            boundTargetPackage = boundTargetPackage.value
+        )
+        if (record == null) {
+            "采集已执行，但原始证据写入失败（请检查存储）"
+        } else {
+            "采集完成：evidence=${record.evidenceId} 原始字符=${record.rawText.length} " +
+                "整理字符=${organization.text.length} 行=${organization.rowCount} " +
+                "选项=${organization.optionMarkerCount} 图像=${if (record.imageRef != null) "已保存" else "无"}"
+        }
+    }
+
+    /** 测试中心：按当前上下文与指令预览「真正会发给模型的注入文本」（不会发请求）。 */
+    fun previewRequestTextForTest(instruction: String): String {
+        val context = realtimeEvidence.currentContext()
+        val contextText = context?.text.orEmpty()
+        if (contextText.isBlank()) {
+            return "（当前没有可用题目上下文）\n${instruction.trim()}"
+        }
+        return buildInjectedPrompt(instruction, contextText)
+    }
+
+    /** 测试中心：解码某张图像证据用于预览（不用于请求）。 */
+    fun decodeEvidenceImageForTest(image: ContextImageRef): Bitmap? =
+        evidenceImageFiles.decodePreview(
+            ImageAssetRecord(
+                imageId = image.imageId,
+                evidenceId = image.evidenceId,
+                questionId = image.questionId,
+                originalRef = image.originalRef,
+                previewRef = image.previewRef,
+                sha256 = image.sha256,
+                capturedAtMillis = image.capturedAtMillis,
+                width = 0,
+                height = 0,
+                available = image.available
+            )
+        )
+
+    /** 测试中心：按保留策略清理（活动题目不受影响）。 */
+    suspend fun pruneEvidenceForTest(): String = withContext(Dispatchers.IO) {
+        val before = realtimeEvidence.stats().evidenceCount
+        realtimeEvidence.prune(
+            RealtimeEvidenceRecorder.DEFAULT_RETENTION_MILLIS,
+            activeQuestionId = realtimeViewportCollector.status().questionKey
+        )
+        val after = realtimeEvidence.stats().evidenceCount
+        "清理完成：证据 $before → $after 条（活动题目与 7 天内证据保留）"
+    }
+
+    private suspend fun awaitEvidenceContext(questionId: String): AssembledQuestionContext =
+        withContext(Dispatchers.IO) {
+            realtimeEvidence.rebuildContext(
+                questionId = questionId,
+                boundTargetPackage = boundTargetPackage.value
+            )
+        }
 
     private companion object {
         /** 聊天默认系统提示词（无产品化要求时的中性缺省值）。 */

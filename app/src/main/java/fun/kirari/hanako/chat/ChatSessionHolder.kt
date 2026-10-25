@@ -8,6 +8,12 @@ import `fun`.kirari.hanako.data.ChatSessionsContainer
 import `fun`.kirari.hanako.data.ChatSessionPersistence
 import `fun`.kirari.hanako.data.ModelProviderConfig
 import `fun`.kirari.hanako.debug.AppDebugLogStore
+import `fun`.kirari.hanako.evidence.ContextImageRef
+import `fun`.kirari.hanako.evidence.ImageAssetRecord
+import `fun`.kirari.hanako.evidence.RequestTraceRecord
+import `fun`.kirari.hanako.evidence.VisionCapability
+import `fun`.kirari.hanako.evidence.planVisionImages
+import `fun`.kirari.hanako.evidence.visionCapabilityOf
 import `fun`.kirari.hanako.network.ChatHistoryMessage
 import `fun`.kirari.hanako.network.LlmEvent
 import `fun`.kirari.hanako.network.UnifiedLLMClient
@@ -189,7 +195,16 @@ internal class ChatSessionHolder(
     /** 注入结果上报接缝：上下文真正进入最终 prompt 后才上报 [ScreenReadStatus.SEND_INJECTED]。 */
     private val screenContextReporter: ((ScreenReadReport) -> Unit)? = null,
     /** 聊天发送链路诊断日志接缝（非敏感，含 traceId）。 */
-    private val traceLogger: ((String) -> Unit)? = null
+    private val traceLogger: ((String) -> Unit)? = null,
+    /**
+     * 题目图像证据读取接缝：把已选中的图像证据读成模型输入用的 base64（JPEG）。
+     *
+     * 返回数量必须与入参一一对应；任一读取失败时返回的列表会变短，发送侧据此如实记录
+     * 「图像未发送」而不是伪造成功。
+     */
+    private val contextImageLoader: ((List<ContextImageRef>) -> List<String>)? = null,
+    /** 请求追踪写入接缝：记录实际发送的文字指纹、图像 id、视觉能力状态与失败阶段。 */
+    private val requestTraceSink: ((RequestTraceRecord) -> Unit)? = null
 ) {
     // 初始即归一化：老用户无历史时也保证存在一个可写的空会话。
     private val _state = MutableStateFlow(normalize(ChatSessionsContainer()))
@@ -510,7 +525,78 @@ internal class ChatSessionHolder(
         /** 本次视口标识（**与 traceId 不同**）。 */
         val liveViewportId: String? = null,
         /** 上下文来源（[`fun`.kirari.hanako.screencontext.ScreenContextSource] 的名字）。 */
-        val source: String? = null
+        val source: String? = null,
+        // ---- 实时互动证据层：上下文身份 + 图像证据 + 明确缺失 ----
+        val questionId: String? = null,
+        val contextVersion: Int = 0,
+        val contextStatus: String? = null,
+        val contextImages: List<ContextImageRef> = emptyList(),
+        val contextMissing: List<String> = emptyList()
+    )
+
+    /** 迷你窗可见的实时上下文状态（数据来自证据库组装结果，不是静态样例）。 */
+    internal data class RealtimeContextUiStatus(
+        val status: String,
+        val questionId: String?,
+        val version: Int,
+        val imageCount: Int,
+        val missing: List<String>,
+        val updatedAtMillis: Long
+    ) {
+        val label: String
+            get() {
+                val base = when (status) {
+                    "READY" -> "题目上下文：就绪"
+                    "PARTIAL" -> "题目上下文：部分可用"
+                    "UPDATING" -> "题目上下文：更新中"
+                    "STALE" -> "题目上下文：已过期"
+                    else -> "题目上下文：不可用"
+                }
+                val imagePart = if (imageCount > 0) " · 图像 $imageCount 张" else ""
+                return base + imagePart + " · v$version"
+            }
+    }
+
+    private val _realtimeContextStatus = MutableStateFlow<RealtimeContextUiStatus?>(null)
+
+    /** 最近一次请求绑定的题目上下文状态；供迷你聊天窗口如实展示。 */
+    internal val realtimeContextStatus: StateFlow<RealtimeContextUiStatus?> =
+        _realtimeContextStatus.asStateFlow()
+
+    private fun publishContextStatus(result: ScreenContextResult.Available) {
+        val status = result.contextStatus ?: return
+        _realtimeContextStatus.value = RealtimeContextUiStatus(
+            status = status,
+            questionId = result.questionId,
+            version = result.contextVersion,
+            imageCount = result.contextImages.count { it.available },
+            missing = result.contextMissing,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+    }
+
+    private fun ContextImageRef.toImageAsset(): ImageAssetRecord = ImageAssetRecord(
+        imageId = imageId,
+        evidenceId = evidenceId,
+        questionId = questionId,
+        originalRef = originalRef,
+        previewRef = previewRef,
+        sha256 = sha256,
+        capturedAtMillis = capturedAtMillis,
+        width = 0,
+        height = 0,
+        available = available
+    )
+
+    private fun ImageAssetRecord.toContextRef(): ContextImageRef = ContextImageRef(
+        imageId = imageId,
+        evidenceId = evidenceId,
+        questionId = questionId,
+        originalRef = originalRef,
+        previewRef = previewRef,
+        available = available,
+        capturedAtMillis = capturedAtMillis,
+        sha256 = sha256
     )
 
     private fun startStream(
@@ -592,6 +678,23 @@ internal class ChatSessionHolder(
                         }
                     }
                     traceLogger?.invoke("trace=$assistantId send-not-requested-then-failed reason=$failureReason")
+                    requestTraceSink?.invoke(
+                        RequestTraceRecord(
+                            traceId = assistantId,
+                            questionId = bound.questionId,
+                            contextVersion = bound.contextVersion,
+                            contextStatus = bound.contextStatus ?: "UNAVAILABLE",
+                            textChars = 0,
+                            textFingerprint = "-",
+                            imageIds = emptyList(),
+                            imageCount = 0,
+                            visionStatus = "NOT_ATTEMPTED",
+                            sent = false,
+                            failStage = "context_unavailable",
+                            errorMessage = failureReason,
+                            createdAtMillis = System.currentTimeMillis()
+                        )
+                    )
                     return@launch
                 }
 
@@ -618,27 +721,63 @@ internal class ChatSessionHolder(
                 }
 
                 val systemPrompt = if (bound.hadContext) REALTIME_ANSWER_SYSTEM_PROMPT else config.systemPrompt
+                // ---- 视觉输入能力门控：能力未确认时不发送图像，并如实说明（绝不静默忽略）----
+                val visionCapability = visionCapabilityOf(provider.kind, model)
+                val visionPlan = planVisionImages(
+                    capability = visionCapability,
+                    images = bound.contextImages.map { it.toImageAsset() }
+                )
+                val loadedContextImages = if (visionPlan.imagesToSend.isEmpty()) {
+                    emptyList()
+                } else {
+                    val refs = visionPlan.imagesToSend.map { it.toContextRef() }
+                    contextImageLoader?.invoke(refs).orEmpty()
+                }
+                val sentContextImages = visionPlan.imagesToSend.take(loadedContextImages.size)
+                val contextImagesBase64 = loadedContextImages.take(loadedContextImages.size)
+                val visionNotice = if (bound.contextImages.isNotEmpty() && sentContextImages.isEmpty()) {
+                    "\n\n【本次未发送图像：${visionPlan.note}；文字上下文可能缺少图表/公式信息】"
+                } else {
+                    ""
+                }
+                val effectivePrompt = bound.prompt + visionNotice
+                val visionStatus = buildString {
+                    append(visionCapability.name)
+                    append(" sent=").append(sentContextImages.size)
+                    if (visionPlan.imagesToSend.size > sentContextImages.size) {
+                        append(" loadFailed=").append(visionPlan.imagesToSend.size - sentContextImages.size)
+                    }
+                    if (visionPlan.omittedImages.isNotEmpty()) {
+                        append(" omitted=").append(visionPlan.omittedImages.size)
+                    }
+                    if (bound.contextImages.isNotEmpty() && sentContextImages.isEmpty()) {
+                        append(" note=").append(visionPlan.note.replace(' ', '_'))
+                    }
+                }
                 // R8.7 P3.4/P3.6：这里记录的是**即将真正传给 streamSource.stream() 的同一个变量**
-                // （bound.prompt / bound.questionText），不是任何「预期文本」的替身。
+                // （effectivePrompt / bound.questionText），不是任何「预期文本」的替身。
                 // 与 AppContainer 侧的 `contextFp` 逐字比对，即可证明「注入的上下文 = 真正发出的 prompt」。
                 traceLogger?.invoke(
                     "trace=$assistantId stream-send source=${bound.source ?: "none"} " +
-                        "promptChars=${bound.prompt.length} promptFp=${ocrFingerprintOf(bound.prompt)} " +
+                        "promptChars=${effectivePrompt.length} promptFp=${ocrFingerprintOf(effectivePrompt)} " +
                         "contextChars=${bound.questionText?.length ?: 0} " +
                         "contextFp=${bound.questionText?.let(::ocrFingerprintOf) ?: "-"} " +
                         "injectedSegmentIds=${bound.includedSegmentIds.joinToString(",").ifBlank { "-" }} " +
                         "hasSegmentBreak=${bound.hasSegmentBreak} liveIncluded=${bound.liveIncluded} " +
                         "liveVerified=${bound.liveVerified} liveViewportId=${bound.liveViewportId ?: "-"} " +
-                        "recentHistory=${history.size} provider=$model"
+                        "recentHistory=${history.size} provider=$model " +
+                        "vision=$visionStatus sentImageIds=${sentContextImages.joinToString(",") { it.imageId }.ifBlank { "-" }}"
                 )
                 var receivedDone = false
+                var traceFailureStage: String? = null
+                var traceErrorMessage: String? = null
                 try {
                     streamSource.stream(
                         provider = provider,
                         model = model,
                         systemPrompt = systemPrompt,
-                        userPrompt = bound.prompt,
-                        imagesBase64 = imagesBase64,
+                        userPrompt = effectivePrompt,
+                        imagesBase64 = imagesBase64 + contextImagesBase64,
                         webSearch = session.webSearch,
                         thinking = session.thinking,
                         firstDeltaTimeoutMillis = firstDeltaTimeoutMillis,
@@ -659,9 +798,31 @@ internal class ChatSessionHolder(
                     if (!receivedDone) finish(sessionId, assistantId, ChatMessageStatus.Error)
                 } catch (cancellation: CancellationException) {
                     finish(sessionId, assistantId, ChatMessageStatus.Done)
+                    traceFailureStage = "cancelled"
                     throw cancellation
                 } catch (error: Throwable) {
                     finish(sessionId, assistantId, ChatMessageStatus.Error)
+                    traceFailureStage = "stream"
+                    traceErrorMessage = error.message ?: error.javaClass.simpleName
+                } finally {
+                    // 请求追踪：与测试中心展示的是同一份真实数据（文字指纹 + 实际图像 id + 能力状态）。
+                    requestTraceSink?.invoke(
+                        RequestTraceRecord(
+                            traceId = assistantId,
+                            questionId = bound.questionId,
+                            contextVersion = bound.contextVersion,
+                            contextStatus = bound.contextStatus ?: "UNAVAILABLE",
+                            textChars = bound.questionText?.length ?: 0,
+                            textFingerprint = bound.questionText?.let(::ocrFingerprintOf) ?: "-",
+                            imageIds = sentContextImages.map { it.imageId },
+                            imageCount = sentContextImages.size,
+                            visionStatus = visionStatus,
+                            sent = traceFailureStage == null,
+                            failStage = traceFailureStage,
+                            errorMessage = traceErrorMessage,
+                            createdAtMillis = System.currentTimeMillis()
+                        )
+                    )
                 }
             } finally {
                 // 只清空「仍属于本次请求」的活跃标记：旧请求收尾不得清空新请求的标记。
@@ -709,10 +870,15 @@ internal class ChatSessionHolder(
                 )
                 // R8.4：`context-injected` 不能再只表示「某段字符串被包装进 prompt」，必须同时说明
                 // 来源、内容质量门控结论与是否携带视觉输入，才能区分「读到壳文字」与「读到题目」。
+                publishContextStatus(result)
                 traceLogger?.invoke(
                     "trace=$assistantId context-injected source=${result.source} chars=${result.text.length} " +
                         "quality=${result.readReport.contentQuality ?: "-"} " +
-                        "visualInput=${result.readReport.visualInput ?: false}"
+                        "visualInput=${result.readReport.visualInput ?: false} " +
+                        "contextQuestion=${result.questionId ?: "-"} contextVersion=${result.contextVersion} " +
+                        "contextStatus=${result.contextStatus ?: "-"} " +
+                        "contextImages=${result.contextImages.count { it.available }} " +
+                        "contextMissing=${result.contextMissing.size}"
                 )
                 BoundRequest(
                     userMessageId = userMessageId,
@@ -725,7 +891,12 @@ internal class ChatSessionHolder(
                     liveIncluded = result.liveIncluded,
                     liveVerified = result.liveVerified,
                     liveViewportId = result.liveViewportId,
-                    source = result.source.name
+                    source = result.source.name,
+                    questionId = result.questionId,
+                    contextVersion = result.contextVersion,
+                    contextStatus = result.contextStatus,
+                    contextImages = result.contextImages,
+                    contextMissing = result.contextMissing
                 )
             }
         }

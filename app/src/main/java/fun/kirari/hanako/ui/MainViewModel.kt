@@ -51,7 +51,7 @@ data class ConnectionTestState(
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
-    private val container = (application as HanakoApplication).container
+    internal val container = (application as HanakoApplication).container
     private val repository: SettingsRepository = container.settingsRepository
     private val localOcrManager: LocalOcrManager = container.localOcrManager
     private val providerModelsApi = ProviderModelsApi(container.networkClientProvider)

@@ -1,5 +1,6 @@
 package `fun`.kirari.hanako.chat
 
+import `fun`.kirari.hanako.evidence.ContextImageRef
 import `fun`.kirari.hanako.screencontext.ScreenContextSource
 import `fun`.kirari.hanako.screencontext.ScreenReadReport
 
@@ -46,6 +47,16 @@ internal sealed interface ScreenContextResult {
         val hasSegmentBreak: Boolean = false,
         val liveIncluded: Boolean = false,
         val liveVerified: Boolean = true,
-        val liveViewportId: String? = null
+        val liveViewportId: String? = null,
+        /** 权威题目上下文的问题标识（来自证据库组装结果）。 */
+        val questionId: String? = null,
+        /** 上下文版本号（同一题目每重建一次 +1）。 */
+        val contextVersion: Int = 0,
+        /** 上下文状态名：[`fun`.kirari.hanako.evidence.QuestionContextStatus] 的 name（READY/PARTIAL/...）。 */
+        val contextStatus: String? = null,
+        /** 与本题关联的图像证据引用；真正是否发送由发送侧按模型能力决定。 */
+        val contextImages: List<ContextImageRef> = emptyList(),
+        /** 明确缺失 / 无法确认的内容说明。 */
+        val contextMissing: List<String> = emptyList()
     ) : ScreenContextResult
 }

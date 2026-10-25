@@ -1237,14 +1237,17 @@ internal fun realtimePerceptionStatusText(
     active: Boolean,
     snapshot: ScreenContextSnapshot?,
     report: ScreenReadReport?,
-    collection: RealtimeCollectionStatus
+    collection: RealtimeCollectionStatus,
+    /** 证据层题目上下文状态（如「题目上下文：就绪 · 图像 2 张 · v3」）；null = 未接入时保持原样。 */
+    contextLabel: String? = null
 ): String {
     if (!active) return ""
+    val contextSuffix = contextLabel?.trim()?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
     if (report?.status == ScreenReadStatus.SEND_FAILED) {
-        return "实时感知中 · 本次发送失败：${failureStageText(report.failureStage)}"
+        return "实时感知中 · 本次发送失败：${failureStageText(report.failureStage)}$contextSuffix"
     }
     val ocrSuffix = collection.lastOcrStatusNote?.let { "；后台 OCR：$it" }.orEmpty()
-    return when {
+    val base = when {
         !collection.enabled -> "实时感知中 · 后台采集未启动（实时模式未开启）"
         collection.fragmentCount > 0 && collection.poolText.isNotBlank() ->
             "实时感知中 · 后台采集中（文本池 ${collection.fragmentCount} 片段 / " +
@@ -1263,6 +1266,7 @@ internal fun realtimePerceptionStatusText(
             "实时感知中 · 已确认目标应用，但当前视口未读到文本（已保留滚动证据，等待滚动后按限频识别）$ocrSuffix"
         else -> "实时感知中 · 已读到无障碍文本（尚未形成文本池）$ocrSuffix"
     }
+    return base + contextSuffix
 }
 
 /** 把持续采集状态渲染为多行只读诊断文本（纯函数，供诊断页展示；**不含**完整 OCR 原文，也不写 Logcat）。 */

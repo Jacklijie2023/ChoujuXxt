@@ -120,7 +120,8 @@ fun SettingsMenuScreen(
     onNavigateAssistant: () -> Unit,
     onNavigateMore: () -> Unit,
     onNavigateAppearance: () -> Unit,
-    onNavigateDebugLogs: () -> Unit
+    onNavigateDebugLogs: () -> Unit,
+    onNavigateRealtimeTest: () -> Unit = {}
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -187,6 +188,16 @@ fun SettingsMenuScreen(
                         })
                     } catch (_: Exception) {}
                 }
+            )
+        }
+
+        item {
+            // 实时互动测试中心：使用真实运行时与证据库数据，验证采集 / 过滤 / 图文请求链路。
+            SettingsEntryCard(
+                title = "实时互动测试中心",
+                subtitle = "运行状态 · 原始证据 · 过滤对照 · 图像与请求追踪（全部真实数据）",
+                icon = Icons.Default.Timer,
+                onClick = onNavigateRealtimeTest
             )
         }
 
